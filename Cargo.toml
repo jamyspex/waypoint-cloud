@@ -1,0 +1,30 @@
+[package]
+name = "waypoint-bringup"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+critical-section = "1.2.0"
+embassy-executor = "0.10.0"
+embassy-net = { version = "0.9.1", features = ["dhcpv4", "dns", "medium-ethernet", "tcp", "udp"] }
+embassy-sync = "0.8.0"
+embassy-time = "0.5.1"
+esp-alloc = "0.11.0"
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32"] }
+esp-hal = { version = "1.2.0", features = ["esp32", "unstable"] }
+esp-println = { version = "0.17.0", default-features = false, features = ["esp32", "uart"] }
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp32", "wifi", "unstable"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-radio", "esp32"] }
+esp-storage = { version = "0.10.0", features = ["esp32"] }
+httparse = { version = "1.10", default-features = false }
+mbedtls-rs = { version = "0.3", features = ["esp32", "embassy-time", "hook-wall-clock", "kex-ecdhe-rsa", "alg-rsa", "use-gcc"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+static_cell = "2.1.1"
+time = { version = "0.3.47", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
