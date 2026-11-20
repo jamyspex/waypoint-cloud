@@ -1,6 +1,7 @@
 import { parse } from "node-html-parser";
 import { createHash } from "node:crypto";
-import { londonClock, row, type Row } from "./board.js";
+import { displayText, londonClock, row, type Graphic, type Page, type Row } from "./board.js";
+import { textWidth } from "./font.js";
 import { airPresentation, type Aircraft, isMilitary } from "./air.js";
 import { railPresentation, type Train } from "./rail.js";
 
@@ -19,6 +20,36 @@ async function request(url: string, extra?: Record<string, string>, timeoutMs = 
   const result = await fetch(url, { headers: { ...headers, ...extra }, signal: AbortSignal.timeout(timeoutMs) });
   if (!result.ok) throw new Error(`Feed HTTP ${result.status}`);
   return result;
+}
+
+function fitText(text: string, pixels: number): string {
+  while (text && textWidth(text) > pixels) text = text.slice(0, -1);
+  return text.trimEnd();
+}
+
+// Draw the departures with a fixed route column so destinations line up whatever the route numbers are.
+export function busGraphics(rows: Row[], title: string): { graphics: Graphic[]; clock: NonNullable<Page["clock"]> } {
+  const split = rows.map(([, label]) => {
+    const space = label.indexOf(" ");
+    return space < 0 ? ["", label] : [label.slice(0, space), label.slice(space + 1)];
+  });
+  const column = Math.max(0, ...split.map(([route]) => textWidth(route))) + 6;
+  const graphics: Graphic[] = [
+    [2, 0, 1, 15, "BUS"], [254 - textWidth("LIVE"), 0, 1, 11, "LIVE"],
+    [2, 9, 1, 15, displayText(title, 26)], [0, 18, 256, 1, 5], [0, 63, 256, 1, 3],
+  ];
+  rows.forEach(([lead, , detail], index) => {
+    const [route, destination] = split[index];
+    const top = 21 + index * 10;
+    graphics.push([2, top, 1, 12, lead]);
+    if (route) graphics.push([44, top, 1, 12, route]);
+    const left = 44 + (route ? column : 0);
+    const text = fitText(destination, 250 - textWidth(detail) - 6 - left);
+    if (text) graphics.push([left, top, 1, 15, text]);
+    graphics.push([254 - textWidth(detail), top, 1, 10, detail]);
+  });
+  // The firmware draws the live clock right-aligned, so centre it like the text layout.
+  return { graphics, clock: { right: 128 + Math.ceil(textWidth("00:00") / 2), shade: 8 } };
 }
 
 export async function busRows(stops: Settings["buses"], now: Date): Promise<Row[]> {

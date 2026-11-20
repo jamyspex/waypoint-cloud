@@ -1,7 +1,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { detailedBoardKey, displayText, isBoard, isDetailedBoard, londonClock, maxBoardBytes, maxDetailedBoardBytes, row, screenIndex, screensOf, type Board, type DetailedBoard, type Graphic, type GraphicAnimation, type Marquee, type Mode, type Page, type Row } from "./board.js";
-import { aircraftRadius, busRows, fetchOrbits, nearbyAircraft, railRows, type Orbit, type Settings } from "./feeds.js";
+import { aircraftRadius, busGraphics, busRows, fetchOrbits, nearbyAircraft, railRows, type Orbit, type Settings } from "./feeds.js";
 
 import { energyDay, energyScreens, fetchDemand, fetchEnergyPages, withDemand } from "./octopus.js";
 import { combineEnergyDays, compactBitmap, fitGraphics, withGraphics } from "./graphics.js";
@@ -105,7 +105,7 @@ type PageSpec = {
   mode: Mode;
   title: string;
   empty: string;
-  getRows: () => Promise<Row[] | { rows: Row[]; stale: boolean; graphics?: Graphic[]; animation?: GraphicAnimation; marquee?: Marquee }>;
+  getRows: () => Promise<Row[] | { rows: Row[]; stale: boolean; graphics?: Graphic[]; animation?: GraphicAnimation; marquee?: Marquee; clock?: Page["clock"] }>;
 };
 
 export async function handler() {
@@ -153,7 +153,10 @@ export async function handler() {
   const specs: PageSpec[] = [
     {
       id: "bus", mode: "bus", title: buses[0]?.label ?? "BUS DEPARTURES", empty: "NO UPCOMING BUSES",
-      getRows: () => busRows(buses, now),
+      getRows: async () => {
+        const rows = await busRows(buses, now);
+        return rows.length ? { rows, stale: false, ...busGraphics(rows, buses[0]?.label ?? "BUS DEPARTURES") } : rows;
+      },
     },
     ...settings.rails.slice(0, 4).map((station): PageSpec => ({
       id: `rail-${station.crs}`, mode: "rail", title: station.label, empty: "NO UPCOMING TRAINS",
@@ -178,7 +181,7 @@ export async function handler() {
       return { id: spec.id, mode: spec.mode, title, updated,
         state: !Array.isArray(result) && result.stale ? "stale" : "live",
         graphics: Array.isArray(result) ? undefined : result.graphics,
-        clock: spec.mode === "rail" && !Array.isArray(result) && result.graphics ? { right: 254, shade: 9 } : undefined,
+        clock: Array.isArray(result) || !result.graphics ? undefined : result.clock ?? (spec.mode === "rail" ? { right: 254, shade: 9 } : undefined),
         animation: Array.isArray(result) ? undefined : result.animation,
         marquee: Array.isArray(result) ? undefined : result.marquee,
         rows: rows.length ? rows : [row("", spec.empty, "")] };
