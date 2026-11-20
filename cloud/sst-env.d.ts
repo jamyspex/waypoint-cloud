@@ -26,6 +26,10 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Bucket"
     }
+    "RefreshOrbits": {
+      "name": string
+      "type": "sst.aws.Function"
+    }
     "Scenes": {
       "name": string
       "type": "sst.aws.Bucket"

@@ -9,7 +9,9 @@ export type Settings = {
   buses: { stop: string; label: string; filter: string; offset: number }[];
   rails: { crs: string; label: string; calling: string; platform: string; offset: number }[];
   air: { lat: number; lon: number; radius: number };
-  space: { lat: number; lon: number; alt: number; mask: number; overhead: number; cacheHours: number };
+  space: { lat: number; lon: number; alt: number; mask: number; overhead: number; cacheHours: number;
+    // Minimum elevation in degrees for a passing satellite to get a live card (default 30).
+    liveElevation?: number };
   // Optional sea point for tides when the display location is inland.
   tide?: { lat: number; lon: number; label?: string };
 };
@@ -155,9 +157,41 @@ export async function nearbyAircraft(settings: Settings["air"], reserveFallback:
 export type Orbit = { name: string; line1: string; line2: string };
 const groups = [["ISS", "CSS"], ["STARLINK"], ["NOAA", "METOP"], ["AO-", "SO-"], ["GALILEO"], ["HST", "IRIDIUM"]];
 
+const maxStarlinks = 150;
+export const maxOrbitAgeDays = 7;
+
+function parseTle(text: string): Orbit[] {
+  const lines = text.trim().split(/\r?\n/);
+  const orbits: Orbit[] = [];
+  for (let index = 0; index + 2 < lines.length; index += 3) {
+    orbits.push({ name: lines[index].trim(), line1: lines[index + 1], line2: lines[index + 2] });
+  }
+  return orbits;
+}
+
+const inclination = (orbit: Orbit) => Number(orbit.line2.slice(8, 16));
+// TLE epoch as milliseconds: two-digit year and fractional day of year from line 1.
+export function epochOf(orbit: Orbit): number {
+  const year = Number(orbit.line1.slice(18, 20));
+  const day = Number(orbit.line1.slice(20, 32));
+  return Date.UTC(year < 57 ? 2000 + year : 1900 + year, 0, 1) + (day - 1) * 86_400_000;
+}
+
+// CelesTrak lists every active Starlink. Keep the ones whose orbits can climb 30 degrees into a Highland sky
+// (inclination 50 degrees or more), polar shells first, then an even spread of the 53 degree shell.
+async function starlinks(): Promise<Orbit[]> {
+  const text = await (await request("https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle", undefined, 45_000)).text();
+  const reachable = parseTle(text).filter((orbit) => inclination(orbit) >= 50);
+  const polar = reachable.filter((orbit) => inclination(orbit) >= 60);
+  const rest = reachable.filter((orbit) => inclination(orbit) < 60);
+  const room = Math.max(0, maxStarlinks - polar.length);
+  const step = rest.length / Math.max(1, room);
+  return [...polar.slice(0, maxStarlinks), ...Array.from({ length: Math.min(room, rest.length) }, (_, i) => rest[Math.floor(i * step)])];
+}
+
 export async function fetchOrbits(mask: number): Promise<Orbit[]> {
-  const queries = groups.filter((_, index) => Boolean(mask & (1 << index))).flat();
-  if (!queries.length) return [];
+  const queries = groups.filter((_, index) => Boolean(mask & (1 << index))).flat().filter((name) => name !== "STARLINK");
+  if (!queries.length && !(mask & 2)) return [];
   const catalogues = [
     { enabled: mask & 1, group: "stations", name: /^(ISS \(ZARYA\)|CSS \(TIANHE\))/i },
     { enabled: mask & 4, group: "weather", name: /^(NOAA 2[01]|METOP|SUOMI)/i },
@@ -165,27 +199,27 @@ export async function fetchOrbits(mask: number): Promise<Orbit[]> {
   ];
   const results = await Promise.allSettled([
     ...queries.map(async (name) => {
-      const url = `https://tle.ivanstanojevic.me/api/tle/?search=${encodeURIComponent(name)}&page-size=${name === "STARLINK" ? 100 : 30}`;
+      const url = `https://tle.ivanstanojevic.me/api/tle/?search=${encodeURIComponent(name)}&page-size=30`;
       const data = await (await request(url)).json() as { member?: Orbit[] };
       if (!Array.isArray(data.member)) throw new Error("Unexpected TLE response");
       return data.member;
     }),
     ...catalogues.filter(({ enabled }) => enabled).map(async ({ group, name }) => {
       const text = await (await request(`https://celestrak.org/NORAD/elements/gp.php?GROUP=${group}&FORMAT=tle`)).text();
-      const lines = text.trim().split(/\r?\n/);
-      const orbits: Orbit[] = [];
-      for (let index = 0; index + 2 < lines.length; index += 3) {
-        const label = lines[index].trim();
-        if (name.test(label)) orbits.push({ name: label, line1: lines[index + 1], line2: lines[index + 2] });
-      }
-      return orbits;
+      return parseTle(text).filter((orbit) => name.test(orbit.name));
     }),
+    ...(mask & 2 ? [starlinks()] : []),
   ]);
   const records = new Map<string, Orbit>();
   for (const result of results) {
-    if (result.status !== "fulfilled") continue;
+    if (result.status !== "fulfilled") {
+      console.warn("orbits: source failed: %s", result.reason instanceof Error ? result.reason.message : "error");
+      continue;
+    }
     for (const orbit of result.value) {
       if (typeof orbit?.name !== "string" || !/^1 /.test(orbit.line1) || !/^2 /.test(orbit.line2)) continue;
+      // Old elements belong to satellites that have re-entered or are too far out of date to place.
+      if (!(Math.abs(Date.now() - epochOf(orbit)) <= maxOrbitAgeDays * 86_400_000)) continue;
       records.set(orbit.line1.slice(2, 7), { name: orbit.name, line1: orbit.line1, line2: orbit.line2 });
     }
   }

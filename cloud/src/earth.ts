@@ -9,7 +9,8 @@ export const earthTilt = 24 * Math.PI / 180;
 const cosTilt = Math.cos(earthTilt);
 const sinTilt = Math.sin(earthTilt);
 
-export function globeGraphics(center: { x: number; y: number }, radius: number): Graphic[] {
+/** A shaded globe seen from above `centerLongitude` (radians), tilted to show the northern hemisphere. */
+export function globeGraphics(center: { x: number; y: number }, radius: number, centerLongitude = 0, landShade = 12): Graphic[] {
   const diameter = radius * 2 + 1;
   const stride = Math.ceil(diameter / 8);
   const relief = Buffer.alloc(stride * diameter);
@@ -27,11 +28,11 @@ export function globeGraphics(center: { x: number; y: number }, radius: number):
       relief[offset] |= bit;
       if (light > .38) daylight[offset] |= bit;
       const latitude = Math.asin(y * cosTilt + z * sinTilt);
-      const longitude = Math.atan2(x, z * cosTilt - y * sinTilt);
+      const longitude = Math.atan2(x, z * cosTilt - y * sinTilt) + centerLongitude;
       if (light > .18 && isLand(latitude, longitude)) land[offset] |= bit;
     }
   }
-  return ([[3, relief], [6, daylight], [12, land]] as const).flatMap(([shade, pixels]) =>
+  return ([[3, relief], [6, daylight], [landShade, land]] as const).flatMap(([shade, pixels]) =>
     packedBitmap(center.x - radius, center.y - radius, diameter, diameter, 1, shade, pixels));
 }
 

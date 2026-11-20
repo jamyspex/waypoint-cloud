@@ -135,6 +135,21 @@ export default $config({
     });
     new sst.aws.CronV2("RefreshFeeds", { function: collector, schedule: "rate(1 minute)" });
 
+    // Satellite catalogue: CelesTrak updates every two hours and serves each group once per update,
+    // and the full Starlink list is too slow to download inside the one-minute collector.
+    const orbitRefresher = new sst.aws.Function("RefreshOrbits", {
+      handler: "src/orbits.handler",
+      runtime: "nodejs22.x",
+      timeout: "90 seconds",
+      memory: "512 MB",
+      environment: { SCENES_BUCKET: scenes.name, FEED_SETTINGS: feedSettings },
+      permissions: [
+        { actions: ["s3:GetObject", "s3:PutObject"], resources: [$interpolate`${scenes.arn}/feeds/orbits.json`] },
+        { actions: ["ssm:GetParameter"], resources: [$interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${feedSettings}`] },
+      ],
+    });
+    new sst.aws.CronV2("RefreshOrbitsSchedule", { function: orbitRefresher, schedule: "rate(2 hours)" });
+
     // Freight: AWS reads RDM's NWR Train Movements Kafka topic and hands batches to this Lambda,
     // which keeps the latest position of every freight train in feeds/freight-trains.json.
     const trainMovements = aws.secretsmanager.getSecretOutput({ name: `waypoint-terminal/${$app.stage}/rdm-train-movements` });

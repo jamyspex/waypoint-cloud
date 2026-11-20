@@ -43,11 +43,12 @@ async function write(key: string, data: unknown) {
 
 type OrbitCache = { version: 2; fetchedAt: number; mask: number; orbits: Orbit[] };
 
+// The RefreshOrbits Lambda keeps feeds/orbits.json current every two hours; fetch here only to bootstrap.
 async function getOrbits(settings: Settings["space"], now: Date): Promise<OrbitCache & { stale: boolean }> {
   const cached = await read(orbitKey).catch(() => null) as OrbitCache | null;
   const sameCatalog = cached?.mask === settings.mask && Array.isArray(cached.orbits);
-  if (sameCatalog && cached.version === 2 && now.getTime() - cached.fetchedAt < settings.cacheHours * 3600_000) {
-    return { ...cached, stale: false };
+  if (sameCatalog && cached.version === 2) {
+    return { ...cached, stale: now.getTime() - cached.fetchedAt > Math.max(6, settings.cacheHours * 3) * 3600_000 };
   }
   try {
     const fresh: OrbitCache = { version: 2, fetchedAt: now.getTime(), mask: settings.mask, orbits: await fetchOrbits(settings.mask) };
@@ -136,7 +137,8 @@ export async function handler() {
   }) : Promise.resolve(undefined);
   const settings = JSON.parse(raw) as Settings;
   const space = getOrbits(settings.space, now).then((catalogue) => ({
-    liveSpace: { lat: settings.space.lat, lon: settings.space.lon, stale: catalogue.stale, orbits: catalogue.orbits },
+    liveSpace: { lat: settings.space.lat, lon: settings.space.lon, overhead: settings.space.liveElevation ?? 30, stale: catalogue.stale,
+      orbits: catalogue.orbits },
     stale: catalogue.stale, ...spacePresentation(catalogue, settings.space, now),
   })).catch(() => undefined);
   const oldPages = isBoard(previous) ? new Map(previous.pages.map((p) => [p.id, p])) : new Map<string, Page>();

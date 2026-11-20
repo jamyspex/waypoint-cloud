@@ -29,7 +29,8 @@ export type Page = {
 export type Board = { version: 2; rotation: number; pages: Page[] };
 export type MeetingFocus = { title: string; label: string; starts: number; ends: number; showInProgress: boolean };
 export type LiveOrbitCatalog = {
-  lat: number; lon: number; stale: boolean;
+  // overhead: minimum elevation in degrees for a satellite to count as passing over.
+  lat: number; lon: number; stale: boolean; overhead?: number;
   orbits: { name: string; line1: string; line2: string }[];
 };
 export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page[] };
