@@ -30,10 +30,18 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 // Last sector of the Rust app0 partition on this Waypoint's partition map.
 const TOKEN_OFFSET: u32 = 0x1ff000;
 
-pub static SKIP_SCREEN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-/// Title of the screen after the one on display, for the button's loading card.
-pub static NEXT_TITLE: Mutex<CriticalSectionRawMutex, RefCell<String>> =
-    Mutex::new(RefCell::new(String::new()));
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Skip {
+    /// Short press: the next screen.
+    Screen,
+    /// Long press: the first screen of the next section.
+    Section,
+}
+
+pub static SKIP_SCREEN: Signal<CriticalSectionRawMutex, Skip> = Signal::new();
+/// Titles of the next screen and the next section's first screen, for the button's loading card.
+pub static NEXT_TITLE: Mutex<CriticalSectionRawMutex, RefCell<(String, String)>> =
+    Mutex::new(RefCell::new((String::new(), String::new())));
 
 struct ActiveScreen {
     id: String,
@@ -90,6 +98,7 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
     let mut index_tag = None;
     let mut legacy_tag = None;
     let mut active: Option<ActiveScreen> = None;
+    let mut skip_section = false;
     let mut resume_at: Option<String> = None;
     let mut visible = Vec::<(String, u64)>::new();
     loop {
@@ -100,7 +109,8 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
             continue;
         }
 
-        if SKIP_SCREEN.try_take().is_some() {
+        if let Some(skip) = SKIP_SCREEN.try_take() {
+            skip_section |= skip == Skip::Section;
             if let Some(current) = &mut active {
                 current.end_early();
             }
@@ -176,7 +186,15 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
         };
         let id = active
             .as_ref()
-            .and_then(|current| index.next_after(&current.id))
+            .and_then(|current| {
+                if skip_section {
+                    index
+                        .next_section_after_screen(&current.id)
+                        .map(|screen| screen.id.as_str())
+                } else {
+                    index.next_after(&current.id)
+                }
+            })
             .or(resume_at.as_deref())
             .unwrap_or(&index.screens[0].id);
         let path = format!("{PATH}?view=screen&screen={id}&at={at}");
@@ -208,11 +226,13 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
             }
         };
         if let Some(current) = &mut active {
-            if with_deadline(current.ends, SKIP_SCREEN.wait())
-                .await
-                .is_ok()
-            {
+            if let Ok(skip) = with_deadline(current.ends, SKIP_SCREEN.wait()).await {
                 current.end_early();
+                if skip == Skip::Section {
+                    // The prefetched screen is in the same section, so fetch the next section instead.
+                    skip_section = true;
+                    continue;
+                }
                 if board.pages[0]
                     .starts_at
                     .is_some_and(|start| clock::unix_millis().is_some_and(|now| start > now))
@@ -253,11 +273,17 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
         });
         println!("Screen updated: {id}");
         let next_title = index.next_after_screen(id).map(loading_title).unwrap_or_default();
-        NEXT_TITLE.lock(|title| title.replace(next_title));
+        let section_title = index
+            .next_section_after_screen(id)
+            .map(loading_title)
+            .unwrap_or_default();
+        NEXT_TITLE.lock(|title| title.replace((next_title, section_title)));
+        skip_section = false;
         resume_at = None;
         UPDATES.signal(Update::Screen(board, previously_visible));
         let prefetch_at = start + Duration::from_millis(remaining.saturating_sub(PREFETCH_MS));
-        if with_deadline(prefetch_at, SKIP_SCREEN.wait()).await.is_ok() {
+        if let Ok(skip) = with_deadline(prefetch_at, SKIP_SCREEN.wait()).await {
+            skip_section = skip == Skip::Section;
             if let Some(current) = &mut active {
                 current.end_early();
             }

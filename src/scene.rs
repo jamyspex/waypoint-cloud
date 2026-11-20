@@ -76,6 +76,16 @@ impl ScreenIndex {
         Some(&self.screens[(position + 1) % self.screens.len()])
     }
 
+    /// First screen after `id` in a different section (mode), such as the screen after the last rail board.
+    pub fn next_section_after_screen(&self, id: &str) -> Option<&ScreenRef> {
+        let position = self.screens.iter().position(|screen| screen.id == id)?;
+        let mode = &self.screens[position].mode;
+        (1..self.screens.len())
+            .map(|step| &self.screens[(position + step) % self.screens.len()])
+            .find(|screen| &screen.mode != mode)
+            .or_else(|| self.next_after_screen(id))
+    }
+
     pub fn surviving_successor<'a>(&self, id: &str, updated: &'a Self) -> Option<&'a str> {
         let position = self.screens.iter().position(|screen| screen.id == id)?;
         let (before, after) = self.screens.split_at(position);

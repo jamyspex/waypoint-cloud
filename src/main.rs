@@ -8,7 +8,7 @@ use core::{future::pending, panic::PanicInfo};
 use embassy_executor::Spawner;
 use embassy_net::{Runner, StackResources};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::rng::Rng;
@@ -35,7 +35,14 @@ use scene::{Animation, Content, Mode, Primitive, UPDATES, Update};
 const TITLE: &str = "WAYPOINT";
 const LOADING_DELAY_MS: u64 = 150;
 const LOADING_GIVE_UP_MS: u64 = 30_000;
-static BUTTON_PRESS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+#[derive(Clone, Copy)]
+enum Press {
+    Short,
+    Long,
+}
+
+static BUTTON_PRESS: Signal<CriticalSectionRawMutex, Press> = Signal::new();
+const LONG_PRESS: Duration = Duration::from_millis(600);
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -108,7 +115,8 @@ async fn main(spawner: Spawner) {
     let mut last_frame: Option<(usize, usize, Option<usize>)> = None;
     let mut last_clock = None;
     // Set while the cloud task fetches a screen the button skipped to.
-    let mut loading: Option<(Instant, Option<&'static str>)> = None;
+    // (started, API error, skipping a whole section)
+    let mut loading: Option<(Instant, Option<&'static str>, bool)> = None;
     loop {
         let loop_started = Instant::now();
         let mut interval = 70;
@@ -141,29 +149,34 @@ async fn main(spawner: Spawner) {
             }
             Some(Update::Status(status)) if loading.is_some() => {
                 println!("{status}");
-                loading = loading.map(|(since, _)| (since, Some(status)));
+                loading = loading.map(|(since, _, section)| (since, Some(status), section));
             }
             Some(Update::Status(status)) if content.is_none() => report(&mut display, status),
             _ => (),
         }
 
-        if BUTTON_PRESS.try_take().is_some() {
-            match &content {
-                Some(Content::Board(board)) if board.pages.len() > 1 => {
+        if let Some(press) = BUTTON_PRESS.try_take() {
+            match (&content, press) {
+                (Some(Content::Board(board)), Press::Short) if board.pages.len() > 1 => {
                     board_offset =
                         board.next_page_offset(board_offset + started.elapsed().as_millis());
                     started = Instant::now();
                     last_frame = None;
                 }
                 // Ignore presses until the requested screen arrives.
-                Some(Content::Board(_)) if loading.is_none() => {
-                    cloud::SKIP_SCREEN.signal(());
-                    loading = Some((Instant::now(), None));
+                (Some(Content::Board(_)), press) if loading.is_none() => {
+                    let section = matches!(press, Press::Long);
+                    cloud::SKIP_SCREEN.signal(if section {
+                        cloud::Skip::Section
+                    } else {
+                        cloud::Skip::Screen
+                    });
+                    loading = Some((Instant::now(), None, section));
                 }
                 _ => (),
             }
         }
-        if let Some((since, status)) = loading {
+        if let Some((since, status, section)) = loading {
             let waited = since.elapsed().as_millis();
             if waited >= LOADING_GIVE_UP_MS {
                 // Fall back to the current screen if the fetch never completes.
@@ -178,7 +191,10 @@ async fn main(spawner: Spawner) {
                         let message = status.unwrap_or(
                             ["LOADING   ", "LOADING.  ", "LOADING.. ", "LOADING..."][dots],
                         );
-                        let next = cloud::NEXT_TITLE.lock(|title| title.borrow().clone());
+                        let next = cloud::NEXT_TITLE.lock(|titles| {
+                            let titles = titles.borrow();
+                            if section { titles.1.clone() } else { titles.0.clone() }
+                        });
                         let title = if next.is_empty() { "NEXT SCREEN" } else { next.as_str() };
                         display.show(title, message).expect("OLED loading screen");
                         last_frame = Some(frame);
@@ -370,7 +386,12 @@ async fn button_task(mut button: Input<'static>) {
         button.wait_for_high().await;
         Timer::after(debounce).await;
         if button.is_high() {
-            BUTTON_PRESS.signal(());
+            // Holding past the threshold skips a section without waiting for release.
+            let press = match with_timeout(LONG_PRESS, button.wait_for_low()).await {
+                Ok(()) => Press::Short,
+                Err(_) => Press::Long,
+            };
+            BUTTON_PRESS.signal(press);
         }
     }
 }
