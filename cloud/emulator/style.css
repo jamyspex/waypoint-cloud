@@ -14,3 +14,8 @@ button:focus-visible, select:focus-visible { outline: 2px solid #9ad5d5; outline
 label { color: #bbc3c5; font-size: 14px; }
 label select { margin-left: 4px; }
 footer { color: #aeb9bb; font: 13px ui-monospace, monospace; margin-top: 20px; }
+nav { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 14px; font-size: 14px; }
+nav a { color: #9ad5d5; text-decoration: none; padding-bottom: 2px; border-bottom: 1px solid transparent; }
+nav a:hover { border-bottom-color: #9ad5d5; }
+nav a[aria-current="page"] { color: #eaebeb; border-bottom-color: #eaebeb; }
+nav a:focus-visible { outline: 2px solid #9ad5d5; outline-offset: 2px; }

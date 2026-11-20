@@ -10,6 +10,11 @@ import { landShade } from "./nadir.js";
 import { calendarPage } from "./calendar.js";
 import { marinePages } from "./marine.js";
 import { skyPages } from "./sky.js";
+import { weatherScreen } from "./weather.js";
+import { gridScreens } from "./carbon.js";
+import { auroraScreen } from "./aurora.js";
+import { freightPage } from "./freight-screen.js";
+import type { FreightFile } from "./freight.js";
 import { reserveAircraftFallback } from "./air-fallback.js";
 
 const s3 = new S3Client({});
@@ -149,6 +154,10 @@ export async function handler() {
     console.warn("sky: %s", error instanceof Error ? error.message : "render error");
     return undefined;
   });
+  const weather = weatherScreen(settings.space, now);
+  const freight = read("feeds/freight-trains.json").then((file) => freightPage(file as FreightFile, now)).catch(() => undefined);
+  const grid = gridScreens(now);
+  const aurora = auroraScreen(settings.space, now);
   const buses = settings.buses.slice(0, 4);
   const specs: PageSpec[] = [
     {
@@ -212,7 +221,13 @@ export async function handler() {
   });
   const basePages = [...pages, ...combineEnergyDays(await energy)];
   const board: DetailedBoard = { version: 2, rotation: 60, pages: basePages.map(withGraphics), ...await calendar,
-    aircraft: [...ordered, ...remaining.values()].map(withGraphics), marine: await marine, sky: await sky };
+    aircraft: [...ordered, ...remaining.values()].map(withGraphics), marine: await marine };
+  const skyScreens = [...(await weather ? [(await weather)!] : []), ...(await sky ?? [])];
+  if (skyScreens.length) board.sky = skyScreens;
+  const gridPages = await grid;
+  if (gridPages.length) board.grid = gridPages;
+  board.aurora = await aurora;
+  board.freight = await freight;
   board.liveSpace = (await space)?.liveSpace;
   const screens = screensOf(board);
   if (!isDetailedBoard(board) || Buffer.byteLength(JSON.stringify(board)) > maxDetailedBoardBytes

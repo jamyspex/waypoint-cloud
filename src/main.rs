@@ -20,6 +20,7 @@ use esp_radio::wifi::{
     AuthenticationMethodConfig, Config as WifiConfig, Interface, WifiController, sta::StationConfig,
 };
 use esp_storage::FlashStorage;
+use esp_hal::system::Stack;
 use static_cell::StaticCell;
 
 mod clock;
@@ -108,6 +109,29 @@ async fn main(spawner: Spawner) {
     spawner.spawn(button_task(button).expect("scene button task"));
 
     report(&mut display, "WIFI CONNECTING");
+
+    // Run the display on the second core so blocking TLS work on this core cannot stall animations.
+    // Main DRAM is nearly full, so the second core's stack lives in the memory reclaimed from the ROM.
+    #[unsafe(link_section = ".dram2_uninit")]
+    static mut APP_CORE_STACK: core::mem::MaybeUninit<Stack<16384>> = core::mem::MaybeUninit::uninit();
+    // SAFETY: taken once, here; a stack's contents are themselves uninitialised words.
+    let app_core_stack =
+        unsafe { &mut *(core::ptr::addr_of_mut!(APP_CORE_STACK) as *mut Stack<16384>) };
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        peripherals.FROM_CPU_INTR1,
+        app_core_stack,
+        move || {
+            static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
+            EXECUTOR
+                .init(esp_rtos::embassy::Executor::new())
+                .run(|spawner| spawner.spawn(display_task(display).expect("display task")));
+        },
+    );
+}
+
+#[embassy_executor::task]
+async fn display_task(mut display: Display<'static>) {
     let mut content = None;
     let mut started = Instant::now();
     let mut board_offset = 0;

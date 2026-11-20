@@ -13,11 +13,20 @@
       <h1>Waypoint <span>Emulator</span></h1>
       <button id="refresh">Refresh AWS</button>
     </header>
+    <nav aria-label="Boards">
+      <a href="/">Live board</a>
+      <a href="/demo/air">Aircraft demo</a>
+      <a href="/demo/aurora">Aurora alert demo</a>
+      <a href="/demo/mix">Power mix demo</a>
+      <a href="/demo/freight">Freight demo</a>
+    </nav>
     <section class="case" aria-label="Emulated Waypoint display">
       <canvas id="screen" width="256" height="64" aria-label="256 by 64 Waypoint OLED"></canvas>
     </section>
     <div class="controls">
+      <button id="previous" aria-label="Previous screen" title="Previous screen (←)">‹ Prev</button>
       <label>Screen <select id="page"></select></label>
+      <button id="next" aria-label="Next screen" title="Next screen (→)">Next ›</button>
       <button id="play" aria-pressed="true">Pause</button>
       <button id="restart">Restart screen</button>
     </div>

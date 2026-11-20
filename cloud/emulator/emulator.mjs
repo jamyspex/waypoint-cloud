@@ -7,7 +7,16 @@ const restart = document.querySelector("#restart");
 const refresh = document.querySelector("#refresh");
 const status = document.querySelector("#status");
 const clock = document.querySelector("#time");
-const demo = location.pathname === "/demo/air";
+const demos = {
+  air: "Demo aircraft · one of each drawing type",
+  aurora: "Demo aurora alert · sample activity",
+  mix: "Demo North Scotland mix · sample generation",
+  freight: "Demo Highland freight · sample movements",
+};
+const demo = demos[location.pathname.match(/^\/demo\/([a-z]+)$/)?.[1]];
+for (const link of document.querySelectorAll("nav a")) {
+  if (link.getAttribute("href") === location.pathname) link.setAttribute("aria-current", "page");
+}
 const feedPath = demo ? location.pathname : "";
 if (demo) {
   refresh.textContent = "Reload demo";
@@ -105,7 +114,7 @@ async function select(id, keepTime = false, usePrefetch = true) {
     resumeAt = undefined;
     lastFrame = undefined;
     pageMenu.value = id;
-    status.textContent = demo ? "Demo aircraft · sample readings" : "Live from AWS · " + screen.page.updated;
+    status.textContent = demo ?? "Live from AWS · " + screen.page.updated;
   } catch (error) {
     if (sequence !== request) return;
     if (active) pageMenu.value = active.page.id;
@@ -140,6 +149,19 @@ play.addEventListener("click", () => {
   play.setAttribute("aria-pressed", playing);
 });
 pageMenu.addEventListener("change", () => select(pageMenu.value));
+// Step through the rotation by hand, like a press of the device's side button.
+function step(offset) {
+  if (!index.length) return;
+  const current = index.findIndex(({ id }) => id === (active?.page.id ?? pageMenu.value));
+  select(index[(Math.max(0, current) + offset + index.length) % index.length].id);
+}
+document.querySelector("#previous").addEventListener("click", () => step(-1));
+document.querySelector("#next").addEventListener("click", () => step(1));
+document.addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLSelectElement || event.altKey || event.ctrlKey || event.metaKey) return;
+  if (event.key === "ArrowLeft") step(-1);
+  if (event.key === "ArrowRight") step(1);
+});
 restart.addEventListener("click", () => {
   if (active) {
     elapsed = 0;

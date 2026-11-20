@@ -14,6 +14,14 @@ declare module "sst" {
       "type": "sst.aws.ApiGatewayV2"
       "url": string
     }
+    "FreightMovements": {
+      "name": string
+      "type": "sst.aws.Function"
+    }
+    "RailFilesLondon": {
+      "name": string
+      "type": "sst.aws.Bucket"
+    }
     "Scenes": {
       "name": string
       "type": "sst.aws.Bucket"

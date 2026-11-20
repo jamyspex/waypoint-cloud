@@ -20,7 +20,7 @@ const londonParts = new Intl.DateTimeFormat("en-GB", {
 });
 
 // One-bit drawing surface that becomes a packed bitmap graphic.
-class Canvas {
+export class Canvas {
   readonly pixels: Buffer;
   private readonly stride: number;
   constructor(readonly width: number, readonly height: number) {
@@ -41,7 +41,7 @@ class Canvas {
   }
 }
 
-function bitmap(art: string[]): number[] {
+export function bitmap(art: string[]): number[] {
   return art.map((line) => [...line].reduce((bits, char, x) => char === "#" ? bits | (1 << x) : bits, 0));
 }
 
@@ -76,10 +76,10 @@ export function londonMidnight(time: number): number {
   return guess - offset;
 }
 
-const hhmm = (time: number | undefined) => time === undefined || !Number.isFinite(time) ? "--:--" : londonClock.format(time);
+export const hhmm = (time: number | undefined) => time === undefined || !Number.isFinite(time) ? "--:--" : londonClock.format(time);
 const dateLabel = (time: number) => londonDate.format(time).replace(",", "").toUpperCase();
 
-function header(title: string, now: number): Graphic[] {
+export function header(title: string, now: number): Graphic[] {
   const date = dateLabel(now);
   return [[3, 0, 1, 15, title], [128 - Math.floor(textWidth(date) / 2), 0, 1, 9, date], [0, 10, 256, 1, 3]];
 }
@@ -89,9 +89,9 @@ function duration(ms: number): string {
   return minutes >= 60 ? `${Math.floor(minutes / 60)}H ${String(minutes % 60).padStart(2, "0")}M` : `${minutes}M`;
 }
 
-function page(id: string, mode: Page["mode"], title: string, now: number, graphics: Graphic[], state: Page["state"] = "live"): Page {
+export function page(id: string, mode: Page["mode"], title: string, now: number, graphics: Graphic[], state: Page["state"] = "live", seconds = dwell): Page {
   if (graphics.length > 32) throw new Error(`${id} has too many graphics`);
-  return { id, mode, title, updated: londonClock.format(now), state, rows: [], graphics, clock, dwell_seconds: dwell };
+  return { id, mode, title, updated: londonClock.format(now), state, rows: [], graphics, clock, dwell_seconds: seconds };
 }
 
 // Tides ---------------------------------------------------------------------

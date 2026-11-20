@@ -32,7 +32,7 @@ export type LiveOrbitCatalog = {
   lat: number; lon: number; stale: boolean;
   orbits: { name: string; line1: string; line2: string }[];
 };
-export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[] };
+export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page };
 export const maxBoardBytes = 8192;
 export const maxMarinePhases = 40;
 export const detailedBoardKey = "feeds/waypoint-detailed.json";
@@ -53,7 +53,15 @@ export function screensOf(board: DetailedBoard, notification?: Page, satellites?
       animation: { phase_ms, phases: [phase] },
     }));
   });
-  return [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...screens, ...(board.marine ?? []), ...(board.sky ?? [])];
+  // Grid carbon follows the electricity screens; an aurora alert goes to the front.
+  // Highland freight follows the rail boards.
+  const after = (list: Page[], mode: Page["mode"], extra: Page[]) => {
+    const last = list.map((page) => page.mode).lastIndexOf(mode);
+    return last < 0 ? [...list, ...extra] : [...list.slice(0, last + 1), ...extra, ...list.slice(last + 1)];
+  };
+  const withGrid = after(after(screens, "rail", board.freight ? [board.freight] : []), "energy", board.grid ?? []);
+  return [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...(board.aurora ? [board.aurora] : []),
+    ...withGrid, ...(board.marine ?? []), ...(board.sky ?? [])];
 }
 
 export function screenIndex(screens: Page[]) {
@@ -62,7 +70,7 @@ export function screenIndex(screens: Page[]) {
 
 export function isDetailedBoard(value: unknown): value is DetailedBoard {
   if (!isBoard(value)) return false;
-  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky } = value as DetailedBoard;
+  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight } = value as DetailedBoard;
   const validPage = (page: Page) => isBoard({ version: 2, rotation: value.rotation, pages: [page] });
   return (aircraft === undefined || (Array.isArray(aircraft) && aircraft.every((page) => page?.mode === "air" && validPage(page))))
     && (spacePreviews === undefined || (Array.isArray(spacePreviews) && inRange(spacePreviews.length, 1, 5)
@@ -74,7 +82,11 @@ export function isDetailedBoard(value: unknown): value is DetailedBoard {
     && (agenda === undefined || (agenda?.mode === "calendar" && validPage(agenda)))
     && (marine === undefined || (Array.isArray(marine) && inRange(marine.length, 1, 2)
       && marine.every((page) => page?.mode === "marine" && validPage(page))))
-    && (sky === undefined || (Array.isArray(sky) && inRange(sky.length, 1, 4)
+    && (grid === undefined || (Array.isArray(grid) && inRange(grid.length, 1, 2)
+      && grid.every((page) => page?.mode === "energy" && page.id.startsWith("grid-") && validPage(page))))
+    && (aurora === undefined || (aurora?.id === "aurora" && validPage(aurora)))
+    && (freight === undefined || (freight?.id === "freight" && validPage(freight)))
+    && (sky === undefined || (Array.isArray(sky) && inRange(sky.length, 1, 5)
       && sky.every((page) => page?.id.startsWith("sky-") && validPage(page))))
     && (meetingFocus === undefined || (Array.isArray(meetingFocus) && meetingFocus.every((meeting) =>
       meeting && typeof meeting.title === "string" && typeof meeting.label === "string" && Number.isSafeInteger(meeting.starts)

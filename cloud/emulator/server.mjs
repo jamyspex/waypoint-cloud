@@ -11,14 +11,17 @@ const displayUrl = new URL(path, `https://${host}`);
 const port = Number(process.env.WAYPOINT_PORT || 4280);
 const profile = process.env.AWS_PROFILE || "linespeed-root-admin";
 const exec = promisify(execFile);
-const demoPath = "/demo/air";
-const demoBoard = JSON.parse(await readFile(new URL("./air-demo.json", import.meta.url), "utf8"));
-const { id: demoId, mode: demoMode, title: demoTitle } = demoBoard.pages[0];
-const demoIndex = { version: 3, screens: [{ id: demoId, mode: demoMode, title: demoTitle }] };
+// Saved sample screens for cards that are rarely live. Each is served at /demo/<name>.
+const demos = new Map();
+for (const name of ["air", "aurora", "mix", "freight"]) {
+  const board = JSON.parse(await readFile(new URL(`./${name}-demo.json`, import.meta.url), "utf8"));
+  const screens = board.pages.map(({ id, mode, title }) => ({ id, mode, title }));
+  demos.set(name, { board, index: { version: 3, screens } });
+}
 
 const assets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
-  [demoPath, ["index.html", "text/html; charset=utf-8"]],
+  ...[...demos.keys()].map((name) => [`/demo/${name}`, ["index.html", "text/html; charset=utf-8"]]),
   ["/emulator.mjs", ["emulator.mjs", "text/javascript; charset=utf-8"]],
   ["/render.mjs", ["render.mjs", "text/javascript; charset=utf-8"]],
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
@@ -58,8 +61,11 @@ const server = createServer(async (request, response) => {
   }
   try {
     const incoming = new URL(request.url, "http://localhost");
-    if (incoming.pathname === `${demoPath}/index` || incoming.pathname === `${demoPath}/screen/${demoId}`) {
-      const value = incoming.pathname.endsWith("/index") ? demoIndex : demoBoard;
+    const [, demoName, demoScreen] = incoming.pathname.match(/^\/demo\/([a-z]+)\/(?:index|screen\/([A-Za-z0-9-]{1,24}))$/) ?? [];
+    const sample = demos.get(demoName);
+    const samplePage = demoScreen && sample?.board.pages.find(({ id }) => id === demoScreen);
+    if (sample && (!demoScreen || samplePage)) {
+      const value = samplePage ? { ...sample.board, pages: [samplePage] } : sample.index;
       return response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(value));
     }
     const id = incoming.pathname.match(/^\/screen\/([A-Za-z0-9-]{1,24})$/)?.[1];
