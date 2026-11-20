@@ -1,6 +1,7 @@
 import { parse } from "node-html-parser";
-import { ecfToLookAngles, eciToEcf, gstime, propagate, radiansLat, radiansLong, twoline2satrec } from "satellite.js";
+import { createHash } from "node:crypto";
 import { londonClock, row, type Row } from "./board.js";
+import { airPresentation, type Aircraft, isMilitary } from "./air.js";
 import { railPresentation, type Train } from "./rail.js";
 
 export type Settings = {
@@ -8,12 +9,14 @@ export type Settings = {
   rails: { crs: string; label: string; calling: string; platform: string; offset: number }[];
   air: { lat: number; lon: number; radius: number };
   space: { lat: number; lon: number; alt: number; mask: number; overhead: number; cacheHours: number };
+  // Optional sea point for tides when the display location is inland.
+  tide?: { lat: number; lon: number; label?: string };
 };
 
 const headers = { "User-Agent": "Linespeed Waypoint display" };
 
-async function request(url: string, extra?: Record<string, string>): Promise<Response> {
-  const result = await fetch(url, { headers: { ...headers, ...extra }, signal: AbortSignal.timeout(8000) });
+async function request(url: string, extra?: Record<string, string>, timeoutMs = 8000): Promise<Response> {
+  const result = await fetch(url, { headers: { ...headers, ...extra }, signal: AbortSignal.timeout(timeoutMs) });
   if (!result.ok) throw new Error(`Feed HTTP ${result.status}`);
   return result;
 }
@@ -65,21 +68,57 @@ export async function railRows(station: Settings["rails"][number], credential: s
   return railPresentation(trains, data.locationName, updated, data.platformAvailable !== false);
 }
 
-type Aircraft = { hex?: string; flight?: string; r?: string; t?: string; dst?: number; alt_baro?: number | "ground"; gs?: number; seen_pos?: number };
+export const aircraftRadius = 10;
+export const milAircraftRadius = 50;
 
-export async function airRows(settings: Settings["air"]): Promise<Row[]> {
-  const { lat, lon, radius } = settings;
-  const data = await (await request(`https://api.adsb.lol/v2/lat/${lat.toFixed(4)}/lon/${lon.toFixed(4)}/dist/${radius}`)).json() as {
-    ac?: Aircraft[];
+async function aircraftSnapshot(path: string, reserveFallback: () => Promise<boolean>): Promise<Aircraft[]> {
+  const from = async (base: string): Promise<Aircraft[]> => {
+    const response = await request(`${base}${path}`, { Accept: "application/json" }, 4000);
+    const data = await response.json() as { ac?: Aircraft[] } | null;
+    if (!Array.isArray(data?.ac)) throw new Error("Unexpected aircraft response");
+    return data.ac;
   };
-  if (!Array.isArray(data.ac)) throw new Error("Unexpected aircraft response");
-  return data.ac.filter((a) => a.alt_baro !== "ground" && (a.seen_pos ?? 0) <= 60 && Number.isFinite(a.dst))
-    .sort((a, b) => a.dst! - b.dst!).slice(0, 1).map((a) => {
-      const identity = a.flight?.trim() || a.r || a.hex || "AIRCRAFT";
-      const altitude = typeof a.alt_baro === "number" ? `FL${Math.round(a.alt_baro / 100)}` : "";
-      const speed = typeof a.gs === "number" ? `${Math.round(a.gs)}KT` : "";
-      return row(`${Math.round(a.dst!)}NM`, `${identity} ${a.t ?? ""}`, altitude || speed || "---");
-    });
+  try {
+    return await from("https://opendata.adsb.fi/api/v3");
+  } catch (error) {
+    console.warn("air adsb.fi: %s", error instanceof Error ? error.message : "fetch error");
+    if (!await reserveFallback()) throw error;
+    return await from("https://api.adsb.lol/v2");
+  }
+}
+
+export async function nearbyAircraft(settings: Settings["air"], reserveFallback: () => Promise<boolean>) {
+  const { lat, lon } = settings;
+  const radius = Math.max(milAircraftRadius, aircraftRadius);
+  const snapshot = await aircraftSnapshot(`/lat/${lat.toFixed(4)}/lon/${lon.toFixed(4)}/dist/${radius}`, reserveFallback);
+  const aircraft = snapshot.filter((a) => a && a.alt_baro !== "ground" && (a.seen_pos ?? 0) <= 60)
+    .flatMap((a) => {
+      let distance = a.dst;
+      if (typeof a.lat === "number" && typeof a.lon === "number" && Math.abs(a.lat) <= 90 && Math.abs(a.lon) <= 180) {
+        const rad = Math.PI / 180;
+        const arc = Math.sin((a.lat - lat) * rad / 2) ** 2
+          + Math.cos(lat * rad) * Math.cos(a.lat * rad) * Math.sin((a.lon - lon) * rad / 2) ** 2;
+        distance = 3440.065 * 2 * Math.asin(Math.min(1, Math.sqrt(arc)));
+      }
+      return typeof distance === "number" && distance >= 0 && (distance <= aircraftRadius || isMilitary(a) && distance <= milAircraftRadius) ? [{ a, distance }] : [];
+    }).sort((a, b) => a.distance - b.distance);
+  const unique = new Map<string, typeof aircraft[number]>();
+  for (const contact of aircraft) {
+    const { hex, r, flight, lat, lon, t } = contact.a;
+    const key = [hex, r, flight].find((value) => typeof value === "string" && value.trim())?.trim().toUpperCase()
+      ?? JSON.stringify([lat, lon, t, contact.distance]);
+    const id = `air-${createHash("sha256").update(key).digest("hex").slice(0, 14)}`;
+    if (!unique.has(id)) unique.set(id, contact);
+  }
+  const contacts = [...unique];
+  const deadline = AbortSignal.timeout(4500);
+  const cards = [];
+  for (let i = 0; i < contacts.length; i += 4) {
+    cards.push(...await Promise.all(contacts.slice(i, i + 4).map(async ([id, { a, distance }]) => ({
+      id, ...await airPresentation(a, distance, deadline),
+    }))));
+  }
+  return cards;
 }
 
 export type Orbit = { name: string; line1: string; line2: string };
@@ -121,23 +160,4 @@ export async function fetchOrbits(mask: number): Promise<Orbit[]> {
   }
   if (!records.size) throw new Error("No orbital elements returned");
   return [...records.values()];
-}
-
-export function spaceRows(orbits: Orbit[], settings: Settings["space"], now: Date): Row[] {
-  const observer = { latitude: radiansLat(settings.lat), longitude: radiansLong(settings.lon), height: settings.alt / 1000 };
-  const time = gstime(now);
-  return orbits.flatMap((orbit) => {
-    try {
-      const record = twoline2satrec(orbit.line1, orbit.line2);
-      const state = propagate(record, now);
-      if (!state || !state.position || typeof state.position === "boolean") return [];
-      const angles = ecfToLookAngles(observer, eciToEcf(state.position, time));
-      const elevation = angles.elevation * (180 / Math.PI);
-      if (!Number.isFinite(elevation) || elevation < 5) return [];
-      return [{ elevation, row: row(`${Math.round(elevation)}DEG`, orbit.name,
-        elevation >= settings.overhead ? "OVERHEAD" : `${Math.round(angles.rangeSat)}KM`) }];
-    } catch {
-      return [];
-    }
-  }).sort((a, b) => b.elevation - a.elevation).slice(0, 4).map((item) => item.row);
 }

@@ -7,9 +7,10 @@ use core::{future::pending, panic::PanicInfo};
 
 use embassy_executor::Spawner;
 use embassy_net::{Runner, StackResources};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::delay::Delay;
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
 use esp_hal::rng::Rng;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
@@ -29,9 +30,12 @@ mod scene;
 
 use credentials::Credentials;
 use display::Display;
-use scene::{Animation, Content, Mode, UPDATES, Update};
+use scene::{Animation, Content, Mode, Primitive, UPDATES, Update};
 
 const TITLE: &str = "WAYPOINT";
+const LOADING_DELAY_MS: u64 = 150;
+const LOADING_GIVE_UP_MS: u64 = 30_000;
+static BUTTON_PRESS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -55,6 +59,11 @@ async fn main(spawner: Spawner) {
     reset.set_high();
     delay.delay_millis(100);
     let mut display = Display::new(spi, chip_select, data_command).expect("OLED initialization");
+    // The stock v12.14 firmware treats a high level on GPIO13 as a press.
+    let button = Input::new(
+        peripherals.GPIO13,
+        InputConfig::default().with_pull(Pull::Down),
+    );
     report(&mut display, "READING WIFI");
 
     let mut flash = FlashStorage::new(peripherals.FLASH);
@@ -89,31 +98,96 @@ async fn main(spawner: Spawner) {
     spawner.spawn(network_task(runner).expect("network task"));
     spawner.spawn(wifi_task(controller).expect("Wi-Fi task"));
     spawner.spawn(cloud::poll(stack, token).expect("display API task"));
+    spawner.spawn(button_task(button).expect("scene button task"));
 
     report(&mut display, "WIFI CONNECTING");
     let mut content = None;
     let mut started = Instant::now();
     let mut board_offset = 0;
-    let mut last_frame = None;
+    let mut marquee_offset = 0;
+    let mut last_frame: Option<(usize, usize, Option<usize>)> = None;
+    let mut last_clock = None;
+    // Set while the cloud task fetches a screen the button skipped to.
+    let mut loading: Option<(Instant, Option<&'static str>)> = None;
     loop {
         let loop_started = Instant::now();
         let mut interval = 70;
         match UPDATES.try_take() {
+            Some(Update::Screen(board, previously_visible)) => {
+                loading = None;
+                board_offset = 0;
+                marquee_offset = previously_visible;
+                started = Instant::now();
+                content = Some(Content::Board(board));
+                last_frame = None;
+            }
             Some(Update::Content(mut next)) => {
-                board_offset = match (&mut content, &mut next) {
+                let (offset, kept_page) = match (&mut content, &mut next) {
                     (Some(Content::Board(previous)), Content::Board(board)) => {
                         board.continue_from(previous, board_offset + started.elapsed().as_millis())
                     }
-                    _ => 0,
+                    _ => (0, None),
                 };
+                loading = None;
+                board_offset = offset;
+                marquee_offset = 0;
                 started = Instant::now();
                 content = Some(next);
-                last_frame = None;
+                last_frame = kept_page.and_then(|(old, new)| {
+                    last_frame.and_then(|(index, phase, tick)| {
+                        (index == old).then_some((new, phase, tick))
+                    })
+                });
+            }
+            Some(Update::Status(status)) if loading.is_some() => {
+                println!("{status}");
+                loading = loading.map(|(since, _)| (since, Some(status)));
             }
             Some(Update::Status(status)) if content.is_none() => report(&mut display, status),
             _ => (),
         }
 
+        if BUTTON_PRESS.try_take().is_some() {
+            match &content {
+                Some(Content::Board(board)) if board.pages.len() > 1 => {
+                    board_offset =
+                        board.next_page_offset(board_offset + started.elapsed().as_millis());
+                    started = Instant::now();
+                    last_frame = None;
+                }
+                // Ignore presses until the requested screen arrives.
+                Some(Content::Board(_)) if loading.is_none() => {
+                    cloud::SKIP_SCREEN.signal(());
+                    loading = Some((Instant::now(), None));
+                }
+                _ => (),
+            }
+        }
+        if let Some((since, status)) = loading {
+            let waited = since.elapsed().as_millis();
+            if waited >= LOADING_GIVE_UP_MS {
+                // Fall back to the current screen if the fetch never completes.
+                loading = None;
+                last_frame = None;
+            } else {
+                // A prefetched screen arrives almost at once, so wait briefly before drawing.
+                if waited >= LOADING_DELAY_MS {
+                    let dots = (waited / 400 % 4) as usize;
+                    let frame = (usize::MAX - 1, dots, None);
+                    if last_frame != Some(frame) {
+                        let message = status.unwrap_or(
+                            ["LOADING   ", "LOADING.  ", "LOADING.. ", "LOADING..."][dots],
+                        );
+                        let next = cloud::NEXT_TITLE.lock(|title| title.borrow().clone());
+                        let title = if next.is_empty() { "NEXT SCREEN" } else { next.as_str() };
+                        display.show(title, message).expect("OLED loading screen");
+                        last_frame = Some(frame);
+                    }
+                }
+                Timer::after(Duration::from_millis(interval)).await;
+                continue;
+            }
+        }
         let elapsed_ms = started.elapsed().as_millis();
         match &content {
             Some(Content::Scene(scene)) => {
@@ -127,7 +201,7 @@ async fn main(spawner: Spawner) {
                     Animation::Blink if (elapsed_ms / 650) % 2 == 1 => ("", None, 1),
                     _ => (scene.message.as_str(), None, 0),
                 };
-                let frame = (0, Some(phase));
+                let frame = (0, 0, Some(phase));
                 if last_frame != Some(frame) {
                     display
                         .show_offset(&scene.title, message, offset)
@@ -136,35 +210,76 @@ async fn main(spawner: Spawner) {
                 }
             }
             Some(Content::Board(board)) => {
+                let minute = clock::london_minute();
+                let clock_changed = last_clock != minute;
+                last_clock = minute;
+                let label = clock::time_label(minute);
+                let clock_text = core::str::from_utf8(&label).expect("ASCII clock label");
+                let timeline_elapsed = board.pages[0]
+                    .starts_at
+                    .map(|start| clock::unix_millis().unwrap_or(start).saturating_sub(start));
+                if timeline_elapsed.is_some_and(|elapsed| elapsed >= board.screen_duration()) {
+                    let expired = (usize::MAX, 0, None);
+                    if last_frame != Some(expired) {
+                        report(&mut display, "AWAITING LIVE TRACK");
+                        last_frame = Some(expired);
+                    }
+                    Timer::after(Duration::from_millis(interval)).await;
+                    continue;
+                }
                 let (index, page, elapsed_on_page, visible_time) =
-                    board.page_at(board_offset + elapsed_ms);
+                    board.page_at(timeline_elapsed.unwrap_or(board_offset + elapsed_ms));
                 if page.graphics.is_some() || page.animation.is_some() || page.marquee.is_some() {
                     let commands = page.graphics.as_deref().unwrap_or_default();
-                    let (phase, time, duration) = if let Some(animation) = &page.animation {
-                        let duration = u64::from(animation.phase_ms);
-                        let phase = &animation.phases[(elapsed_on_page / duration) as usize];
-                        (phase.as_slice(), elapsed_on_page % duration, duration)
-                    } else {
-                        (&[][..], 0, 1)
-                    };
-                    let moving = page.animation.is_some()
-                        || page.marquee.as_ref().is_some_and(display::marquee_scrolls);
-                    let tick = moving.then_some(elapsed_on_page as usize / 17);
+                    let (phase, phase_index, time, duration) =
+                        if let Some(animation) = &page.animation {
+                            let duration = u64::from(animation.phase_ms);
+                            let index = (elapsed_on_page / duration) as usize;
+                            (
+                                animation.phases[index].as_slice(),
+                                index,
+                                elapsed_on_page % duration,
+                                duration,
+                            )
+                        } else {
+                            (&[][..], 0, 0, 1)
+                        };
+                    let moving = commands.iter().chain(phase).any(|command| {
+                        matches!(
+                            command,
+                            Primitive::Motion(..)
+                                | Primitive::OccludedMotion(..)
+                                | Primitive::ViewportMotion(..)
+                        )
+                    }) || page.marquee.as_ref().is_some_and(display::marquee_scrolls);
+                    let tick = moving.then_some((elapsed_on_page / 17) as usize);
                     if moving {
-                        interval = 17;
+                        interval = 17 - elapsed_on_page % 17;
                     }
-                    let frame = (index, tick);
-                    if last_frame != Some(frame) {
+                    let frame = (index, phase_index, tick);
+                    let full = last_frame.is_none_or(|(previous, previous_phase, _)| {
+                        previous != index || previous_phase != phase_index
+                    });
+                    if last_frame != Some(frame) || (page.clock.is_some() && clock_changed) {
                         let draw_started = Instant::now();
-                        let marquee = page
-                            .marquee
-                            .as_ref()
-                            .map(|line| (line, visible_time.saturating_sub(600)));
+                        let marquee = page.marquee.as_ref().map(|line| {
+                            (line, (marquee_offset + visible_time).saturating_sub(600))
+                        });
                         display
-                            .show_graphics(commands, phase, time, duration, marquee)
+                            .show_graphics(
+                                commands,
+                                phase,
+                                time,
+                                duration,
+                                marquee,
+                                page.clock
+                                    .as_ref()
+                                    .map(|layout| (layout, clock_text, clock_changed)),
+                                full,
+                            )
                             .expect("OLED graphics page");
                         let draw_micros = draw_started.elapsed().as_micros();
-                        if last_frame.is_none_or(|(previous, _)| previous != index) {
+                        if last_frame.is_none_or(|(previous, _, _)| previous != index) {
                             let title = if page.animation.is_none()
                                 && page.marquee.is_none()
                                 && commands.is_empty()
@@ -186,7 +301,7 @@ async fn main(spawner: Spawner) {
                         last_frame = Some(frame);
                     }
                 } else if matches!(page.mode, Mode::Air) {
-                    let frame = (index, None);
+                    let frame = (index, 0, None);
                     if last_frame != Some(frame) {
                         display.show_aircraft(page).expect("OLED aircraft detail");
                         println!("Showing AIR / FULL SCREEN ({})", page.state.label());
@@ -198,9 +313,9 @@ async fn main(spawner: Spawner) {
                     } else {
                         0
                     };
-                    let frame = (index, Some(shift));
-                    if last_frame != Some(frame) {
-                        if last_frame.is_none_or(|(previous, _)| previous != index) {
+                    let frame = (index, 0, Some(shift));
+                    if last_frame != Some(frame) || clock_changed {
+                        if last_frame.is_none_or(|(previous, _, _)| previous != index) {
                             println!(
                                 "Showing {} / {} ({})",
                                 page.mode.label(),
@@ -208,7 +323,9 @@ async fn main(spawner: Spawner) {
                                 page.state.label()
                             );
                         }
-                        display.show_page(page, shift).expect("OLED board page");
+                        display
+                            .show_page(page, shift, clock_text)
+                            .expect("OLED board page");
                         last_frame = Some(frame);
                     }
                 }
@@ -239,6 +356,23 @@ fn station_config(credentials: Credentials) -> Option<WifiConfig> {
 #[embassy_executor::task]
 async fn network_task(mut runner: Runner<'static, Interface>) {
     runner.run().await;
+}
+
+#[embassy_executor::task]
+async fn button_task(mut button: Input<'static>) {
+    let debounce = Duration::from_millis(25);
+    loop {
+        button.wait_for_low().await;
+        Timer::after(debounce).await;
+        if button.is_high() {
+            continue;
+        }
+        button.wait_for_high().await;
+        Timer::after(debounce).await;
+        if button.is_high() {
+            BUTTON_PRESS.signal(());
+        }
+    }
 }
 
 #[embassy_executor::task]

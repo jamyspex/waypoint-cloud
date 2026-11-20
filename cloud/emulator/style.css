@@ -1,0 +1,16 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #151718; color: #eaebeb; }
+body { margin: 0; }
+main { width: min(1024px, calc(100% - 36px)); margin: clamp(38px, 9vw, 120px) auto; }
+header, .controls, footer { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+header, footer { justify-content: space-between; }
+h1 { font-size: clamp(24px, 5vw, 38px); letter-spacing: -.055em; margin: 0; }
+h1 span { font-weight: 400; color: #aeb4b5; }
+.case { margin: 25px 0 18px; padding: clamp(8px, 2.6vw, 26px); background: #24272a; border: 1px solid #383d40; border-radius: 16px; }
+canvas { display: block; width: 100%; height: auto; aspect-ratio: 4; image-rendering: pixelated; background: #000; }
+button, select { background: #222729; border: 1px solid #494f52; color: inherit; font: inherit; border-radius: 6px; padding: 7px 10px; }
+button { cursor: pointer; }
+button:hover, select:hover { border-color: #869497; }
+button:focus-visible, select:focus-visible { outline: 2px solid #9ad5d5; outline-offset: 2px; }
+label { color: #bbc3c5; font-size: 14px; }
+label select { margin-left: 4px; }
+footer { color: #aeb9bb; font: 13px ui-monospace, monospace; margin-top: 20px; }

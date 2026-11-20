@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Waypoint Emulator</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/emulator.mjs"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Waypoint <span>Emulator</span></h1>
+      <button id="refresh">Refresh AWS</button>
+    </header>
+    <section class="case" aria-label="Emulated Waypoint display">
+      <canvas id="screen" width="256" height="64" aria-label="256 by 64 Waypoint OLED"></canvas>
+    </section>
+    <div class="controls">
+      <label>Screen <select id="page"></select></label>
+      <button id="play" aria-pressed="true">Pause</button>
+      <button id="restart">Restart screen</button>
+    </div>
+    <footer>
+      <output id="status" aria-live="polite">Connecting to AWS</output>
+      <span id="time"></span>
+    </footer>
+  </main>
+</body>
+</html>

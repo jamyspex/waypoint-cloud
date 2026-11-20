@@ -16,9 +16,9 @@ use mbedtls_rs::sys::{
     },
     tm,
 };
-use time::OffsetDateTime;
+use time::{Date, Month, OffsetDateTime, Time};
 
-struct WallClock(Mutex<Cell<Option<(i64, Instant)>>>);
+struct WallClock(Mutex<Cell<Option<(u64, Instant)>>>);
 static CLOCK: WallClock = WallClock(Mutex::new(Cell::new(None)));
 static TIMER: EmbassyTimer = EmbassyTimer;
 
@@ -42,15 +42,15 @@ pub async fn synchronize(stack: Stack<'_>) -> bool {
     }
 
     for host in ["time.aws.com", "time.google.com"] {
-        if let Ok(Some(seconds)) = with_timeout(Duration::from_secs(4), query(stack, host)).await {
-            critical_section::with(|cs| CLOCK.0.borrow(cs).set(Some((seconds, Instant::now()))));
+        if let Ok(Some(millis)) = with_timeout(Duration::from_secs(4), query(stack, host)).await {
+            critical_section::with(|cs| CLOCK.0.borrow(cs).set(Some((millis, Instant::now()))));
             return true;
         }
     }
     false
 }
 
-async fn query(stack: Stack<'_>, host: &str) -> Option<i64> {
+async fn query(stack: Stack<'_>, host: &str) -> Option<u64> {
     let addresses = stack.dns_query(host, DnsQueryType::A).await.ok()?;
     let endpoint: IpEndpoint = (*addresses.first()?, 123).into();
 
@@ -78,20 +78,62 @@ async fn query(stack: Stack<'_>, host: &str) -> Option<i64> {
         return None;
     }
     let ntp = i64::from(u32::from_be_bytes(response[40..44].try_into().ok()?));
+    let fraction = u64::from(u32::from_be_bytes(response[44..48].try_into().ok()?));
     let mut unix = ntp - 2_208_988_800;
     if unix < 0 {
         unix += 1_i64 << 32;
     }
     (1_704_067_200..4_102_444_800)
         .contains(&unix)
-        .then_some(unix)
+        .then_some(unix as u64 * 1000 + ((1000 * fraction) >> 32))
+}
+
+pub fn unix_millis() -> Option<u64> {
+    let (unix, synced_at) = critical_section::with(|cs| CLOCK.0.borrow(cs).get())?;
+    Some(unix + synced_at.elapsed().as_millis())
+}
+
+fn unix_now() -> Option<i64> {
+    Some((unix_millis()? / 1000) as i64)
+}
+
+fn london_minute_at(utc: OffsetDateTime) -> u16 {
+    let last_sunday = |month| {
+        let end = Date::from_calendar_date(utc.year(), month, 31).expect("31-day month");
+        end.with_time(Time::from_hms(1, 0, 0).expect("valid UTC hour"))
+            .assume_utc()
+            .unix_timestamp()
+            - 86_400 * i64::from(end.weekday().number_days_from_sunday())
+    };
+    let unix = utc.unix_timestamp();
+    let summer = (last_sunday(Month::March)..last_sunday(Month::October)).contains(&unix);
+    ((u16::from(utc.hour()) + u16::from(summer)) % 24) * 60 + u16::from(utc.minute())
+}
+
+pub fn london_minute() -> Option<u16> {
+    Some(london_minute_at(
+        OffsetDateTime::from_unix_timestamp(unix_now()?).ok()?,
+    ))
+}
+
+pub fn time_label(minute: Option<u16>) -> [u8; 5] {
+    let Some(minute) = minute else {
+        return *b"--:--";
+    };
+    let hour = (minute / 60) as u8;
+    let min = (minute % 60) as u8;
+    [
+        b'0' + hour / 10,
+        b'0' + hour % 10,
+        b':',
+        b'0' + min / 10,
+        b'0' + min % 10,
+    ]
 }
 
 impl MbedtlsWallClock for WallClock {
     fn instant(&self) -> Option<tm> {
-        let (unix, synced_at) = critical_section::with(|cs| self.0.borrow(cs).get())?;
-        let utc = OffsetDateTime::from_unix_timestamp(unix + synced_at.elapsed().as_secs() as i64)
-            .ok()?;
+        let utc = OffsetDateTime::from_unix_timestamp(unix_now()?).ok()?;
         Some(tm {
             tm_sec: i32::from(utc.second()),
             tm_min: i32::from(utc.minute()),

@@ -1,4 +1,4 @@
-export type Mode = "bus" | "rail" | "air" | "space" | "energy";
+export type Mode = "bus" | "rail" | "air" | "space" | "energy" | "calendar" | "marine" | "sky";
 export type Row = [lead: string, description: string, status: string];
 export type Graphic =
   | [x: number, y: number, width: number, height: number, shade: number]
@@ -6,7 +6,8 @@ export type Graphic =
   | [x: number, y: number, scale: number, shade: number, bitmapRows: number[]]
   | [scale: number, shade: number, bitmapRows: number[], path: [number, number][]]
   | [left: number, top: number, width: number, height: number, scale: number, shade: number, pixels: string]
-  | [scale: number, shade: number, bitmapRows: number[], occluder: [number, number, number], path: string];
+  | [scale: number, shade: number, bitmapRows: number[], occluder: [number, number, number], path: string]
+  | [scale: number, shade: number, bitmapRows: number[], viewport: [number, number, number, number, number], path: string];
 export type GraphicAnimation = { phase_ms: number; phases: Graphic[][] };
 export type Marquee = { left: number; top: number; width: number; shade: number; speed: number; text: string };
 export type Page = {
@@ -17,13 +18,68 @@ export type Page = {
   state: "live" | "stale" | "offline";
   rows: Row[];
   usage_blocks?: (number | null)[];
+  summaries?: { label: string; rows: Row[]; usage: (number | null)[] }[];
   graphics?: Graphic[];
   animation?: GraphicAnimation;
   marquee?: Marquee;
+  clock?: { right: number; shade: number };
+  starts_at?: number;
   dwell_seconds?: number;
 };
 export type Board = { version: 2; rotation: number; pages: Page[] };
+export type MeetingFocus = { title: string; label: string; starts: number; ends: number; showInProgress: boolean };
+export type LiveOrbitCatalog = {
+  lat: number; lon: number; stale: boolean;
+  orbits: { name: string; line1: string; line2: string }[];
+};
+export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[] };
 export const maxBoardBytes = 8192;
+export const maxMarinePhases = 40;
+export const detailedBoardKey = "feeds/waypoint-detailed.json";
+export const maxDetailedBoardBytes = 512 * 1024;
+export const screenId = /^[A-Za-z0-9-]{1,24}$/;
+
+export function screensOf(board: DetailedBoard, notification?: Page, satellites?: Page[]): Page[] {
+  const screens = board.pages.flatMap((page) => {
+    if (page.id === "air" && board.aircraft?.length) return board.aircraft;
+    if (page.id === "air" && page.state !== "offline" && !page.rows[0]?.[0]) return [];
+    if (page.id === "space" && satellites !== undefined) return satellites;
+    if (page.id === "space" && board.spacePreviews?.length) return board.spacePreviews;
+    if (!page.animation) return [page];
+    const { phase_ms, phases } = page.animation;
+    return phases.map((phase, i) => ({
+      ...page, id: `${page.id.slice(0, 21)}-${i + 1}`,
+      title: typeof phase[0]?.[4] === "string" ? phase[0][4].slice(0, 26) : page.title,
+      animation: { phase_ms, phases: [phase] },
+    }));
+  });
+  return [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...screens, ...(board.marine ?? []), ...(board.sky ?? [])];
+}
+
+export function screenIndex(screens: Page[]) {
+  return { version: 3, screens: screens.map(({ id, mode, title }) => ({ id, mode, title })) };
+}
+
+export function isDetailedBoard(value: unknown): value is DetailedBoard {
+  if (!isBoard(value)) return false;
+  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky } = value as DetailedBoard;
+  const validPage = (page: Page) => isBoard({ version: 2, rotation: value.rotation, pages: [page] });
+  return (aircraft === undefined || (Array.isArray(aircraft) && aircraft.every((page) => page?.mode === "air" && validPage(page))))
+    && (spacePreviews === undefined || (Array.isArray(spacePreviews) && inRange(spacePreviews.length, 1, 5)
+      && spacePreviews.every((page) => page?.mode === "space" && validPage(page))))
+    && (liveSpace === undefined || (liveSpace && Number.isFinite(liveSpace.lat) && Math.abs(liveSpace.lat) <= 90
+      && Number.isFinite(liveSpace.lon) && Math.abs(liveSpace.lon) <= 180 && typeof liveSpace.stale === "boolean"
+      && Array.isArray(liveSpace.orbits) && liveSpace.orbits.every((orbit) => orbit && typeof orbit.name === "string"
+        && typeof orbit.line1 === "string" && typeof orbit.line2 === "string")))
+    && (agenda === undefined || (agenda?.mode === "calendar" && validPage(agenda)))
+    && (marine === undefined || (Array.isArray(marine) && inRange(marine.length, 1, 2)
+      && marine.every((page) => page?.mode === "marine" && validPage(page))))
+    && (sky === undefined || (Array.isArray(sky) && inRange(sky.length, 1, 4)
+      && sky.every((page) => page?.id.startsWith("sky-") && validPage(page))))
+    && (meetingFocus === undefined || (Array.isArray(meetingFocus) && meetingFocus.every((meeting) =>
+      meeting && typeof meeting.title === "string" && typeof meeting.label === "string" && Number.isSafeInteger(meeting.starts)
+      && Number.isSafeInteger(meeting.ends) && meeting.starts < meeting.ends && typeof meeting.showInProgress === "boolean")));
+}
 
 export const londonClock = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/London", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
@@ -68,11 +124,17 @@ function isGraphic(value: unknown): value is Graphic {
   if (value.length !== 5) return false;
   const [x, y, scaleOrWidth, shadeOrHeight, content] = value;
   if (Array.isArray(shadeOrHeight)) {
-    return inRange(x, 1, 4) && inRange(y, 0, 15) && bitmap(scaleOrWidth)
-      && shadeOrHeight.length === 3 && inRange(shadeOrHeight[0], 0, 255)
-      && inRange(shadeOrHeight[1], 0, 63) && inRange(shadeOrHeight[2], 1, 64)
-      && typeof content === "string" && inRange(content.length, 12, 144) && content.length % 6 === 0
-      && /^[0-9a-f]+$/.test(content) && Buffer.from(content, "hex").every((byte, i) => i % 3 !== 1 || byte < 64);
+    const [left, top, width, height, samples] = shadeOrHeight;
+    if (!inRange(x, 1, 4) || !inRange(y, 0, 15) || !bitmap(scaleOrWidth)
+      || !inRange(left, 0, 255) || !inRange(top, 0, 63)
+      || typeof content !== "string" || !/^[0-9a-f]+$/.test(content)) return false;
+    if (shadeOrHeight.length === 5) {
+      return inRange(width, 1, Math.min(255, 256 - left)) && inRange(height, 1, 64 - top)
+        && inRange(samples, 2, 24) && inRange(content.length, 8, 4 * samples) && content.length % 4 === 0;
+    }
+    return shadeOrHeight.length === 3 && inRange(width, 1, 64)
+      && inRange(content.length, 12, 144) && content.length % 6 === 0
+      && Buffer.from(content, "hex").every((byte, i) => i % 3 !== 1 || byte < 64);
   }
   if (!inRange(x, 0, 255) || !inRange(y, 0, 63)) return false;
   if (typeof content === "number") {
@@ -91,11 +153,12 @@ export function isBoard(value: unknown): value is Board {
     && board.rotation >= 5 && board.rotation <= 60 && Array.isArray(board.pages)
     && board.pages.length >= 1 && board.pages.length <= 10
     && board.pages.every((p) => p && typeof p.id === "string" && p.id.length <= 24
-      && ["bus", "rail", "air", "space", "energy"].includes(p.mode)
+      && ["bus", "rail", "air", "space", "energy", "calendar", "marine", "sky"].includes(p.mode)
       && ["live", "stale", "offline"].includes(p.state)
       && typeof p.title === "string" && p.title.length >= 1 && p.title.length <= 26
       && typeof p.updated === "string" && /^\d{2}:\d{2}$/.test(p.updated)
       && (p.dwell_seconds === undefined || inRange(p.dwell_seconds, 5, 120))
+      && (p.starts_at === undefined || inRange(p.starts_at, 1_704_067_200_000, 4_102_444_800_000))
       && (p.usage_blocks === undefined || (p.mode === "energy" && Array.isArray(p.usage_blocks)
         && p.usage_blocks.length === 12 && p.usage_blocks.every((value) => value === null
           || inRange(value, 0, 1_000_000))))
@@ -106,8 +169,10 @@ export function isBoard(value: unknown): value is Board {
         && inRange(p.marquee.shade, 0, 15) && inRange(p.marquee.speed, 10, 100)
         && typeof p.marquee.text === "string" && inRange(p.marquee.text.length, 1, 768)
         && /^[\x20-\x7e]+$/.test(p.marquee.text)))
+      && (p.clock === undefined || (p.clock && inRange(p.clock.right, 32, 255)
+        && inRange(p.clock.shade, 0, 15)))
       && (p.animation === undefined || (p.animation && inRange(p.animation.phase_ms, 500, 120000)
-        && Array.isArray(p.animation.phases) && inRange(p.animation.phases.length, 1, 5)
+        && Array.isArray(p.animation.phases) && inRange(p.animation.phases.length, 1, p.mode === "marine" ? maxMarinePhases : 5)
         && p.animation.phases.every((phase) => Array.isArray(phase)
           && phase.length <= 16 && phase.every(isGraphic))))
       && Array.isArray(p.rows) && p.rows.length <= 4

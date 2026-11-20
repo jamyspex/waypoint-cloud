@@ -16,6 +16,7 @@ export default $config({
     const feedSettings = `/waypoint-terminal/${$app.stage}/feed-settings`;
     const railKey = `/waypoint-terminal/${$app.stage}/rail-api-key`;
     const octopusKey = `/waypoint-terminal/${$app.stage}/octopus-api-key`;
+    const calendarPrefix = `/waypoint-terminal/${$app.stage}/calendar`;
     const accountId = aws.getCallerIdentityOutput().accountId;
     const authorizer = api.addAuthorizer({
       name: "SharedDeviceCredential",
@@ -44,6 +45,7 @@ export default $config({
         { actions: ["s3:GetObject"], resources: [
           $interpolate`${scenes.arn}/scenes/waypoint.json`,
           $interpolate`${scenes.arn}/feeds/waypoint.json`,
+          $interpolate`${scenes.arn}/feeds/waypoint-detailed.json`,
         ] },
       ],
     }, { auth: { lambda: authorizer.id } });
@@ -57,17 +59,29 @@ export default $config({
         FEED_SETTINGS: feedSettings,
         RAIL_API_KEY: railKey,
         OCTOPUS_API_KEY: octopusKey,
+        CALENDAR_PREFIX: calendarPrefix,
       },
       permissions: [
         { actions: ["s3:GetObject", "s3:PutObject"], resources: [
           $interpolate`${scenes.arn}/feeds/waypoint.json`,
+          $interpolate`${scenes.arn}/feeds/waypoint-detailed.json`,
           $interpolate`${scenes.arn}/feeds/orbits.json`,
           $interpolate`${scenes.arn}/feeds/energy.json`,
+          $interpolate`${scenes.arn}/feeds/tides.json`,
+          $interpolate`${scenes.arn}/feeds/air-fallback`,
         ] },
         { actions: ["ssm:GetParameters"], resources: [
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${feedSettings}`,
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${railKey}`,
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${octopusKey}`,
+        ] },
+        { actions: ["ssm:GetParameter"], resources: [
+          $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/client`,
+          $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/settings`,
+        ] },
+        { actions: ["ssm:GetParametersByPath"], resources: [
+          $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/accounts`,
+          $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/accounts/*`,
         ] },
       ],
     });

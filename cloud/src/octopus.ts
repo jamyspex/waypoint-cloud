@@ -21,6 +21,7 @@ export const energyScreens = [
   ["energy-now", "ELECTRICITY NOW"],
   ["energy-today", "TODAY ELECTRICITY"],
   ["energy-yesterday", "YESTERDAY ELECTRICITY"],
+  ["energy-weekly", "WEEKLY ELECTRICITY"],
 ] as const;
 
 export function energyDay(now: Date): number {
@@ -49,16 +50,12 @@ function numeric(value: string | null | undefined): number | undefined {
   if (Number.isFinite(number)) return number;
 }
 
-function dailyRows(
-  start: number,
-  end: number,
-  fullDay: boolean,
-  readings: Map<number, number>,
-  tariffAt: (when: number, standing: boolean) => Rate | undefined,
-): { rows: Row[]; usage_blocks?: (number | null)[] } {
-  const usage_blocks: (number | null)[] = Array(12).fill(null);
+type TariffAt = (when: number, standing: boolean) => Rate | undefined;
+
+function summarize(start: number, end: number, readings: Map<number, number>, tariffAt: TariffAt) {
+  const blocks: (number | null)[] = Array(12).fill(null);
   let units = 0;
-  let usagePence = 0;
+  let price = 0;
   let count = 0;
   let priced = 0;
   let last = start;
@@ -68,31 +65,70 @@ function dailyRows(
     count++;
     last = slot + halfHour;
     units += reading;
-    const localHour = Number(londonClock.format(new Date(slot)).slice(0, 2));
-    const bucket = Math.floor(localHour / 2);
-    usage_blocks[bucket] = (usage_blocks[bucket] ?? 0) + Math.round(reading * 1000);
+    const bucket = Math.floor(Number(londonClock.format(new Date(slot)).slice(0, 2)) / 2);
+    blocks[bucket] = (blocks[bucket] ?? 0) + Math.round(reading * 1000);
     const rate = tariffAt(slot, false);
     if (rate) {
       priced++;
-      usagePence += reading * rate.value_inc_vat;
+      price += reading * rate.value_inc_vat;
     }
   }
+  return { units, price, count, priced, last, blocks, expected: (end - start) / halfHour,
+    standing: tariffAt(start, true)?.value_inc_vat };
+}
+
+function totals(units: number, cost: number | undefined, standing: number | undefined, coverage: string): Row[] {
+  const pounds = (pence: number | undefined) => pence === undefined ? "" : (pence / 100).toFixed(2);
+  return [
+    row("", "EST TOTAL GBP INC VAT", pounds(cost)),
+    row("", "ELECTRICITY USED KWH", units.toFixed(2)),
+    row("", "STANDING CHARGE GBP", pounds(standing)),
+    row("", coverage, ""),
+  ];
+}
+
+function dailyRows(
+  start: number, end: number, fullDay: boolean, readings: Map<number, number>, tariffAt: TariffAt,
+): { rows: Row[]; usage_blocks?: (number | null)[] } {
+  const { units, price, count, priced, last, blocks, expected, standing } = summarize(start, end, readings, tariffAt);
   if (!count) return { rows: [row("", "WAITING FOR METER READINGS", "")] };
-  const expected = (end - start) / halfHour;
-  const complete = count === expected;
-  const coverage = complete ? (fullDay ? "FULL DAY" : `TO ${londonClock.format(new Date(last))}`)
+  const coverage = count === expected ? (fullDay ? "FULL DAY" : `TO ${londonClock.format(new Date(last))}`)
     : `PARTIAL ${count}/${expected}`;
-  const standing = tariffAt(start, true)?.value_inc_vat;
-  const pounds = (pence: number) => (pence / 100).toFixed(2);
-  return {
-    usage_blocks,
-    rows: [
-      row("", "EST TOTAL GBP INC VAT", standing !== undefined && priced === count ? pounds(usagePence + standing) : ""),
-      row("", "ELECTRICITY USED KWH", units.toFixed(2)),
-      row("", "STANDING CHARGE GBP", standing === undefined ? "" : pounds(standing)),
-      row("", coverage, ""),
-    ],
-  };
+  const cost = standing !== undefined && priced === count ? price + standing : undefined;
+  return { usage_blocks: blocks, rows: totals(units, cost, standing, coverage) };
+}
+
+function weeklyRows(
+  label: string, start: number, end: number, cutoff: number, readings: Map<number, number>, tariffAt: TariffAt,
+) {
+  const usage: (number | null)[] = Array(7).fill(null);
+  let units = 0;
+  let cost = 0;
+  let standing = 0;
+  let priced = true;
+  let found = false;
+  let partial = false;
+  let last = start;
+  for (let d = start; d < end; d += day) {
+    const from = midnight(d);
+    const to = Math.min(midnight(d + day), cutoff);
+    if (to <= from) break;
+    const stats = summarize(from, to, readings, tariffAt);
+    if (stats.count !== stats.expected) partial = true;
+    if (!stats.count) continue;
+    found = true;
+    last = stats.last;
+    units += stats.units;
+    usage[(d - start) / day] = Math.round(stats.units * 1000);
+    if (stats.standing === undefined || stats.priced !== stats.count) priced = false;
+    standing += stats.standing ?? 0;
+    cost += stats.price + (stats.standing ?? 0);
+  }
+  const coverage = partial ? "PARTIAL READINGS"
+    : cutoff >= midnight(end) ? "FULL WEEK"
+    : `TO ${dayLabel.format(new Date(last))} ${londonClock.format(new Date(last))}`;
+  return { label, usage, rows: found ? totals(units, priced ? cost : undefined, priced ? standing : undefined, coverage)
+    : [row("", "WAITING FOR METER READINGS", "")] };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -230,7 +266,9 @@ export async function fetchEnergyPages(key: string, now: Date): Promise<{ pages:
   const instant = now.getTime();
   const today = energyDay(now);
   const startToday = midnight(today);
-  const since = midnight(today - day);
+  const yesterday = midnight(today - day);
+  const monday = today - ((new Date(today).getUTCDay() + 6) % 7) * day;
+  const since = midnight(monday - 7 * day);
   const lastFullSlot = Math.floor(instant / halfHour) * halfHour;
   const points = account.properties.flatMap((property) => property.electricity_meter_points)
     .filter((point) => !point.is_export && point.agreements.some((agreement) => contains(agreement, instant)));
@@ -254,7 +292,7 @@ export async function fetchEnergyPages(key: string, now: Date): Promise<{ pages:
     Promise.all(point.meters.map(({ serial_number }) => list<Reading>(
       `electricity-meter-points/${encodeURIComponent(point.mpan)}/meters/${encodeURIComponent(serial_number)}/consumption/?${period}`, true,
     ))),
-    device?.mpan === point.mpan ? miniReadings(device.id, token, since, lastFullSlot) : new Map<number, number>(),
+    device?.mpan === point.mpan ? miniReadings(device.id, token, yesterday, lastFullSlot) : new Map<number, number>(),
   ]);
   function tariffAt(when: number, standing: boolean): Rate | undefined {
     const agreement = agreements.find((a) => contains(a, when));
@@ -288,7 +326,11 @@ export async function fetchEnergyPages(key: string, now: Date): Promise<{ pages:
       row("", latestAt ? `TO ${dayLabel.format(latestAt)} ${londonClock.format(latestAt)}` : "", ""),
     ] },
     dailyRows(startToday, lastFullSlot, false, readings, tariffAt),
-    dailyRows(since, startToday, true, readings, tariffAt),
+    dailyRows(yesterday, startToday, true, readings, tariffAt),
+    { rows: [], summaries: [
+      weeklyRows("THIS WEEK ELECTRICITY", monday, monday + 7 * day, lastFullSlot, readings, tariffAt),
+      weeklyRows("LAST WEEK ELECTRICITY", monday - 7 * day, monday, lastFullSlot, readings, tariffAt),
+    ] },
   ];
   const expiryDates = [current.valid_to, daily.valid_to, ...agreements.map((a) => a.valid_from)]
     .flatMap((value) => value && Date.parse(value) > instant ? [Date.parse(value)] : []);

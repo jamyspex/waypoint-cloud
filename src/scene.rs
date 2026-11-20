@@ -21,6 +21,7 @@ pub struct Scene {
 }
 
 pub enum Update {
+    Screen(Board, u64),
     Content(Content),
     Status(&'static str),
 }
@@ -33,6 +34,61 @@ pub enum Content {
     Board(Board),
 }
 
+#[derive(Deserialize)]
+pub struct ScreenIndex {
+    version: u8,
+    pub screens: Vec<ScreenRef>,
+}
+
+#[derive(Deserialize)]
+pub struct ScreenRef {
+    pub id: String,
+    // Kept as text so an unfamiliar mode never breaks the whole index.
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+impl ScreenIndex {
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let index: Self = serde_json::from_slice(bytes).ok()?;
+        (index.version == 3
+            && (1..=256).contains(&index.screens.len())
+            && index.screens.iter().enumerate().all(|(i, screen)| {
+                (1..=24).contains(&screen.id.len())
+                    && screen
+                        .id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && index.screens[..i].iter().all(|prior| prior.id != screen.id)
+            }))
+        .then_some(index)
+    }
+
+    pub fn next_after(&self, id: &str) -> Option<&str> {
+        let position = self.screens.iter().position(|screen| screen.id == id)?;
+        Some(&self.screens[(position + 1) % self.screens.len()].id)
+    }
+
+    pub fn next_after_screen(&self, id: &str) -> Option<&ScreenRef> {
+        let position = self.screens.iter().position(|screen| screen.id == id)?;
+        Some(&self.screens[(position + 1) % self.screens.len()])
+    }
+
+    pub fn surviving_successor<'a>(&self, id: &str, updated: &'a Self) -> Option<&'a str> {
+        let position = self.screens.iter().position(|screen| screen.id == id)?;
+        let (before, after) = self.screens.split_at(position);
+        after[1..].iter().chain(before).find_map(|candidate| {
+            updated
+                .screens
+                .iter()
+                .find(|screen| screen.id == candidate.id)
+                .map(|screen| screen.id.as_str())
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Board {
     pub version: u8,
@@ -41,6 +97,22 @@ pub struct Board {
 }
 
 impl Board {
+    pub fn parse_screen(bytes: &[u8]) -> Option<Self> {
+        match Content::parse(bytes)? {
+            Content::Board(board) if board.pages.len() == 1 => Some(board),
+            _ => None,
+        }
+    }
+
+    pub fn screen_duration(&self) -> u64 {
+        self.dwell(&self.pages[0])
+    }
+
+    pub fn next_page_offset(&self, elapsed: u64) -> u64 {
+        let (_, page, within, _) = self.page_at(elapsed);
+        elapsed - within + self.dwell(page)
+    }
+
     fn dwell(&self, page: &Page) -> u64 {
         page.animation.as_ref().map_or(
             u64::from(page.dwell_seconds.unwrap_or(self.rotation)) * 1000,
@@ -70,7 +142,11 @@ impl Board {
         unreachable!()
     }
 
-    pub fn continue_from(&mut self, previous: &mut Board, elapsed: u64) -> u64 {
+    pub fn continue_from(
+        &mut self,
+        previous: &mut Board,
+        elapsed: u64,
+    ) -> (u64, Option<(usize, usize)>) {
         let (old_index, old, within, _) = previous.page_at(elapsed);
         let Some(index) = self
             .pages
@@ -80,15 +156,15 @@ impl Board {
                 _ => page.mode == old.mode && page.title == old.title,
             })
         else {
-            return 0;
+            return (0, None);
         };
         let turns = elapsed / previous.period();
         let incoming = &self.pages[index];
         let new_aircraft = incoming.has_aircraft() && !old.has_aircraft();
         // Keep the objects on an active preview stable until its slot ends.
-        if (old.mode == Mode::Space && old.animation.is_some())
-            || (old.has_aircraft() && incoming.has_aircraft())
-        {
+        let keep_preview = (old.mode == Mode::Space && old.animation.is_some())
+            || (old.has_aircraft() && incoming.has_aircraft());
+        if keep_preview {
             core::mem::swap(&mut self.pages[index], &mut previous.pages[old_index]);
         }
         let before: u64 = self.pages[..index]
@@ -100,7 +176,10 @@ impl Board {
         } else {
             within.min(self.dwell(&self.pages[index]) - 1)
         };
-        turns * self.period() + before + within
+        (
+            turns * self.period() + before + within,
+            keep_preview.then_some((old_index, index)),
+        )
     }
 }
 
@@ -115,7 +194,15 @@ pub struct Page {
     pub graphics: Option<Vec<Primitive>>,
     pub animation: Option<GraphicAnimation>,
     pub marquee: Option<Marquee>,
+    pub clock: Option<ClockLabel>,
+    pub starts_at: Option<u64>,
     pub dwell_seconds: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClockLabel {
+    pub right: u8,
+    pub shade: u8,
 }
 
 impl Page {
@@ -167,6 +254,7 @@ pub enum Primitive {
     Motion(u8, u8, Vec<u16>, Vec<[u8; 2]>),
     PackedBitmap(u8, u8, u8, u8, u8, u8, HexBytes),
     OccludedMotion(u8, u8, Vec<u16>, [u8; 3], HexBytes),
+    ViewportMotion(u8, u8, Vec<u16>, [u8; 5], HexBytes),
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +320,18 @@ impl Primitive {
                     && (6..=72).contains(&path.0.len())
                     && path.0.chunks_exact(3).all(|point| point[1] < 64)
             }
+            Self::ViewportMotion(scale, shade, rows, [x, y, width, height, samples], path) => {
+                (1..=4).contains(scale)
+                    && *shade <= 15
+                    && (1..=32).contains(&rows.len())
+                    && *width > 0
+                    && u16::from(*x) + u16::from(*width) <= 256
+                    && *height > 0
+                    && u16::from(*y) + u16::from(*height) <= 64
+                    && (2..=24).contains(samples)
+                    && path.0.len() % 2 == 0
+                    && (2..=usize::from(*samples)).contains(&(path.0.len() / 2))
+            }
         }
     }
 }
@@ -244,6 +344,9 @@ pub enum Mode {
     Air,
     Space,
     Energy,
+    Calendar,
+    Marine,
+    Sky,
 }
 
 impl Mode {
@@ -254,6 +357,9 @@ impl Mode {
             Self::Air => "AIR",
             Self::Space => "SPACE",
             Self::Energy => "ENERGY",
+            Self::Calendar => "CALENDAR",
+            Self::Marine => "MARINE",
+            Self::Sky => "SKY",
         }
     }
 }
@@ -311,12 +417,20 @@ impl Content {
                                 .dwell_seconds
                                 .is_none_or(|seconds| (5..=120).contains(&seconds))
                             && page.marquee.as_ref().is_none_or(Marquee::valid)
+                            && page
+                                .clock
+                                .as_ref()
+                                .is_none_or(|clock| clock.right >= 32 && clock.shade <= 15)
+                            && page.starts_at.is_none_or(|ms| {
+                                (1_704_067_200_000..=4_102_444_800_000).contains(&ms)
+                            })
                             && page.graphics.as_ref().is_none_or(|commands| {
                                 commands.len() <= 32 && commands.iter().all(Primitive::valid)
                             })
                             && page.animation.as_ref().is_none_or(|animation| {
+                                let max_phases = if page.mode == Mode::Marine { 40 } else { 5 };
                                 (500..=120_000).contains(&animation.phase_ms)
-                                    && (1..=5).contains(&animation.phases.len())
+                                    && (1..=max_phases).contains(&animation.phases.len())
                                     && animation.phases.iter().all(|commands| {
                                         commands.len() <= 16
                                             && commands.iter().all(Primitive::valid)

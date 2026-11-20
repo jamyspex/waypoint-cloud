@@ -1,8 +1,13 @@
-use alloc::{format, string::String};
+use alloc::{format, string::String, vec::Vec};
 use core::{ffi::CStr, str};
 
 use embassy_net::{Stack, dns::DnsQueryType, tcp::TcpSocket};
-use embassy_time::{Duration, Timer, with_timeout};
+use core::cell::RefCell;
+use embassy_sync::{
+    blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
+    signal::Signal,
+};
+use embassy_time::{Duration, Instant, Timer, with_deadline, with_timeout};
 use esp_hal::rng::Trng;
 use esp_println::println;
 use esp_storage::FlashStorage;
@@ -13,16 +18,34 @@ use static_cell::StaticCell;
 
 use crate::{
     clock,
-    scene::{Content, UPDATES, Update},
+    scene::{Board, Content, ScreenIndex, ScreenRef, UPDATES, Update},
 };
 
 const HOST: &CStr = c"o29x98ki18.execute-api.eu-west-1.amazonaws.com";
-const PATH: &str = "/v1/devices/waypoint/display?view=live";
+const PATH: &str = "/v1/devices/waypoint/display";
+const PREFETCH_MS: u64 = 16_000;
 const ROOT_PEM: &str = concat!(include_str!("../certs/amazon-root-ca-1.pem"), "\0");
 const MAX_SCENE: usize = 8192;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 // Last sector of the Rust app0 partition on this Waypoint's partition map.
 const TOKEN_OFFSET: u32 = 0x1ff000;
+
+pub static SKIP_SCREEN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Title of the screen after the one on display, for the button's loading card.
+pub static NEXT_TITLE: Mutex<CriticalSectionRawMutex, RefCell<String>> =
+    Mutex::new(RefCell::new(String::new()));
+
+struct ActiveScreen {
+    id: String,
+    started: Instant,
+    ends: Instant,
+}
+
+impl ActiveScreen {
+    fn end_early(&mut self) {
+        self.ends = self.ends.min(Instant::now());
+    }
+}
 
 pub struct DeviceToken([u8; 64]);
 
@@ -63,50 +86,217 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
         ..Default::default()
     });
 
-    let mut etag = None;
+    let mut index: Option<ScreenIndex> = None;
+    let mut index_tag = None;
+    let mut legacy_tag = None;
+    let mut active: Option<ActiveScreen> = None;
+    let mut resume_at: Option<String> = None;
+    let mut visible = Vec::<(String, u64)>::new();
     loop {
         stack.wait_config_up().await;
-        if clock::synchronize(stack).await {
+        if !clock::synchronize(stack).await {
+            UPDATES.signal(Update::Status("TIME UNAVAILABLE"));
+            Timer::after(POLL_INTERVAL).await;
+            continue;
+        }
+
+        if SKIP_SCREEN.try_take().is_some() {
+            if let Some(current) = &mut active {
+                current.end_early();
+            }
+        }
+        let until_switch = active.as_ref().map_or(0, |current| {
+            current
+                .ends
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+        });
+        let at = clock::unix_millis().unwrap_or(0) + until_switch;
+        let index_path = format!("{PATH}?view=index&at={at}");
+        match with_timeout(
+            Duration::from_secs(5),
+            fetch(
+                stack,
+                &tls,
+                &config,
+                &token,
+                &index_path,
+                index_tag.as_deref(),
+                ScreenIndex::parse,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(Some((new, tag)))) => {
+                if let Some(ActiveScreen { id, .. }) = &active {
+                    if new.next_after(id).is_some() {
+                        resume_at = None;
+                    } else if let Some(previous) = &index {
+                        let anchor = resume_at.as_ref().unwrap_or(id);
+                        if !new.screens.iter().any(|screen| &screen.id == anchor) {
+                            resume_at =
+                                previous.surviving_successor(anchor, &new).map(String::from);
+                        }
+                    }
+                }
+                visible.retain(|(id, _)| new.screens.iter().any(|screen| &screen.id == id));
+                index = Some(new);
+                index_tag = tag;
+            }
+            Ok(Ok(None)) => (),
+            _ => (),
+        }
+        let Some(index) = &index else {
+            // Continue to work against an AWS deployment that still serves the legacy board.
+            let path = format!("{PATH}?view=live");
             match with_timeout(
-                Duration::from_secs(15),
-                fetch(stack, &tls, &config, &token, etag.as_deref()),
+                Duration::from_secs(10),
+                fetch(
+                    stack,
+                    &tls,
+                    &config,
+                    &token,
+                    &path,
+                    legacy_tag.as_deref(),
+                    Content::parse,
+                ),
             )
             .await
             {
-                Ok(Ok(Some((content, next_tag)))) => {
-                    match &content {
-                        Content::Scene(scene) => {
-                            println!("Scene updated: {} / {}", scene.title, scene.message)
-                        }
-                        Content::Board(board) => {
-                            println!("Live board updated: {} pages", board.pages.len())
-                        }
-                    }
-                    etag = next_tag;
+                Ok(Ok(Some((content, tag)))) => {
+                    legacy_tag = tag;
                     UPDATES.signal(Update::Content(content));
                 }
-                Ok(Ok(None)) => println!("Scene unchanged (304)"),
-                Ok(Err(message)) => {
-                    println!("Scene request: {message}");
-                    UPDATES.signal(Update::Status(message));
-                }
+                Ok(Ok(None)) => (),
+                Ok(Err(reason)) => UPDATES.signal(Update::Status(reason)),
                 Err(_) => UPDATES.signal(Update::Status("API TIMEOUT")),
             }
-        } else {
-            println!("Waiting for network time");
-            UPDATES.signal(Update::Status("TIME UNAVAILABLE"));
+            Timer::after(POLL_INTERVAL).await;
+            continue;
+        };
+        let id = active
+            .as_ref()
+            .and_then(|current| index.next_after(&current.id))
+            .or(resume_at.as_deref())
+            .unwrap_or(&index.screens[0].id);
+        let path = format!("{PATH}?view=screen&screen={id}&at={at}");
+        let board = match with_timeout(
+            Duration::from_secs(10),
+            fetch(
+                stack,
+                &tls,
+                &config,
+                &token,
+                &path,
+                None,
+                Board::parse_screen,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(Some((board, _)))) if board.pages[0].id.as_deref() == Some(id) => board,
+            failure => {
+                let reason = match failure {
+                    Ok(Err(reason)) => reason,
+                    Err(_) => "API TIMEOUT",
+                    _ => "INVALID SCREEN",
+                };
+                println!("Screen request: {reason}");
+                UPDATES.signal(Update::Status(reason));
+                Timer::after(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        if let Some(current) = &mut active {
+            if with_deadline(current.ends, SKIP_SCREEN.wait())
+                .await
+                .is_ok()
+            {
+                current.end_early();
+                if board.pages[0]
+                    .starts_at
+                    .is_some_and(|start| clock::unix_millis().is_some_and(|now| start > now))
+                {
+                    // This live track was prepared for the original switch time.
+                    continue;
+                }
+            }
         }
-        Timer::after(POLL_INTERVAL).await;
+        let duration = board.screen_duration();
+        let remaining = board.pages[0].starts_at.map_or(duration, |start| {
+            duration.saturating_sub(clock::unix_millis().unwrap_or(start).saturating_sub(start))
+        });
+        if remaining == 0 {
+            Timer::after(Duration::from_millis(500)).await;
+            continue;
+        }
+        if let Some(current) = &active {
+            if let Some((_, total)) = visible.iter_mut().find(|(key, _)| *key == current.id) {
+                *total += current
+                    .ends
+                    .saturating_duration_since(current.started)
+                    .as_millis();
+            }
+        }
+        let previously_visible = if let Some((_, total)) = visible.iter().find(|(key, _)| key == id)
+        {
+            *total
+        } else {
+            visible.push((String::from(id), 0));
+            0
+        };
+        let start = Instant::now();
+        active = Some(ActiveScreen {
+            id: String::from(id),
+            started: start,
+            ends: start + Duration::from_millis(remaining),
+        });
+        println!("Screen updated: {id}");
+        let next_title = index.next_after_screen(id).map(loading_title).unwrap_or_default();
+        NEXT_TITLE.lock(|title| title.replace(next_title));
+        resume_at = None;
+        UPDATES.signal(Update::Screen(board, previously_visible));
+        let prefetch_at = start + Duration::from_millis(remaining.saturating_sub(PREFETCH_MS));
+        if with_deadline(prefetch_at, SKIP_SCREEN.wait()).await.is_ok() {
+            if let Some(current) = &mut active {
+                current.end_early();
+            }
+        }
     }
 }
 
-async fn fetch(
+/// Label for the loading card, such as `RAIL: PARTICK`. Falls back to the bare title when it would not fit.
+fn loading_title(screen: &ScreenRef) -> String {
+    let prefix = match screen.mode.as_str() {
+        "bus" => "BUS",
+        "rail" => "RAIL",
+        "air" => "AIR",
+        "space" => "SPACE",
+        "energy" => "ENERGY",
+        "calendar" => "CALENDAR",
+        "marine" => "MARINE",
+        _ => return screen.title.clone(),
+    };
+    if screen.title.starts_with(prefix) {
+        return screen.title.clone();
+    }
+    let label = format!("{prefix}: {}", screen.title);
+    if crate::display::text_width(&label) * 2 <= 248 {
+        label
+    } else {
+        screen.title.clone()
+    }
+}
+
+async fn fetch<T>(
     stack: Stack<'_>,
     tls: &Tls<'_>,
     config: &SessionConfig<'_>,
     token: &DeviceToken,
+    path: &str,
     etag: Option<&str>,
-) -> Result<Option<(Content, Option<String>)>, &'static str> {
+    decode: fn(&[u8]) -> Option<T>,
+) -> Result<Option<(T, Option<String>)>, &'static str> {
     let host = HOST.to_str().map_err(|_| "INVALID API HOST")?;
     let addresses = stack
         .dns_query(host, DnsQueryType::A)
@@ -134,7 +324,7 @@ async fn fetch(
     let conditional = etag.map_or_else(String::new, |tag| format!("If-None-Match: {tag}\r\n"));
     let authorization = token.as_str();
     let request = format!(
-        "GET {PATH} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {authorization}\r\nAccept: application/json\r\n{conditional}Connection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {authorization}\r\nAccept: application/json\r\n{conditional}Connection: close\r\n\r\n"
     );
     session
         .write_all(request.as_bytes())
@@ -198,7 +388,7 @@ async fn fetch(
         received += n;
     }
     drop(session);
-    let content = Content::parse(&response[head_len..end]).ok_or("INVALID SCENE")?;
+    let content = decode(&response[head_len..end]).ok_or("INVALID SCENE")?;
     Ok(Some((content, next_tag)))
 }
 

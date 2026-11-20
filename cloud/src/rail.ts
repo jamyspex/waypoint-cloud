@@ -1,8 +1,30 @@
 import { printableText, row, type Graphic, type Marquee, type Row } from "./board.js";
 
-// Printable ASCII advances from the stock font used by the Waypoint renderer.
-const advances = [4, 2, 4, 6, 6, 5, 6, 2, 4, 4, 6, 6, 3, 4, 2, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 2, 3, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 4, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 3, 5, 9, 4, 5, 3, 6, 6, 6, 6, 6, 5, 6, 6, 4, 5, 5, 4, 6, 6, 6, 6, 6, 6, 6, 5, 6, 6, 6, 6, 6, 6, 4, 2, 4, 6];
+import { textWidth as width } from "./font.js";
+
 const clock = /^\d{1,2}:\d{2}$/;
+
+export function fitCallingText(text: string, limit: number, calling: boolean): string {
+  if (text.length <= limit) return text;
+  if (!calling) {
+    const suffix = " (shortened)";
+    const cut = text.slice(0, limit - suffix.length).replace(/\s+\S*$/, "").trimEnd();
+    return cut + suffix;
+  }
+  const suffix = text.match(/(?:^|, )\+(\d+) more stops$/);
+  const omitted = Number(suffix?.[1] ?? 0);
+  const stops = (suffix ? text.slice(0, suffix.index) : text).split(", ").filter(Boolean)
+    .map((stop) => stop.replace(/ \d{1,2}:\d{2}$/, ""));
+  const condensed = [...stops, ...(omitted ? [`+${omitted} more stops`] : [])].join(", ");
+  if (condensed.length <= limit) return condensed;
+  const count = stops.length + omitted;
+  while (stops.length) {
+    stops.pop();
+    const candidate = [...stops, `+${count - stops.length} more stops`].join(", ");
+    if (candidate.length <= limit) return candidate;
+  }
+  return `+${count} more stops`;
+}
 
 type Stop = { locationName?: string; st?: string; et?: string; at?: string; isCancelled?: boolean };
 export type Train = {
@@ -14,10 +36,6 @@ export type Train = {
   subsequentCallingPoints?: { callingPoint?: Stop[]; assocIsCancelled?: boolean }[];
   cancelReason?: string;
 };
-
-function width(text: string): number {
-  return [...text].reduce((sum, character) => sum + (advances[character.charCodeAt(0) - 32] ?? 6), 0);
-}
 
 function fits(text: string, pixels: number): boolean {
   return text.length <= 48 && width(text) <= pixels;
@@ -97,7 +115,7 @@ export function railPresentation(
   const left = calling ? 8 + width(prefix) : 2;
   const marquee = {
     left, top, width: 254 - left, shade: 12, speed: 40,
-    text: text.length <= 768 ? text : text.slice(0, 765).replace(/\s+\S*$/, "") + "...",
+    text: fitCallingText(text, 768, calling),
   };
   return { rows, graphics, marquee };
 }

@@ -1,8 +1,10 @@
+use core::ops::Range;
+
 use esp_hal::Blocking;
 use esp_hal::gpio::Output;
 use esp_hal::spi::{Error, master::Spi};
 
-use crate::scene::{Marquee, Page, Primitive, State};
+use crate::scene::{ClockLabel, Marquee, Page, Primitive, State};
 
 const WIDTH: usize = 256;
 const HEIGHT: usize = 64;
@@ -18,6 +20,7 @@ pub struct Display<'d> {
     spi: Spi<'d, Blocking>,
     chip_select: Output<'d>,
     data_command: Output<'d>,
+    animation_rows: u64,
 }
 
 impl<'d> Display<'d> {
@@ -30,6 +33,7 @@ impl<'d> Display<'d> {
             spi,
             chip_select,
             data_command,
+            animation_rows: 0,
         };
         // Panel settings recovered from the stock SSD1322 initialization sequence.
         let commands: &[(u8, &[u8])] = &[
@@ -75,8 +79,8 @@ impl<'d> Display<'d> {
         self.draw(|x, y| brightness(title, status, scroll, x, y))
     }
 
-    pub fn show_page(&mut self, page: &Page, shift: usize) -> Result<(), Error> {
-        self.draw(|x, y| page_pixel(page, shift, x, y))
+    pub fn show_page(&mut self, page: &Page, shift: usize, clock: &str) -> Result<(), Error> {
+        self.draw(|x, y| page_pixel(page, shift, clock, x, y))
     }
 
     pub fn show_aircraft(&mut self, page: &Page) -> Result<(), Error> {
@@ -115,21 +119,54 @@ impl<'d> Display<'d> {
         elapsed: u64,
         duration: u64,
         marquee: Option<(&Marquee, u64)>,
+        clock: Option<(&ClockLabel, &str, bool)>,
+        full: bool,
     ) -> Result<(), Error> {
         let layers = commands.iter().chain(phase);
-        let mut poses = [([0; 2], None); 48];
+        let mut poses = [None; 48];
+        let mut active = 0;
         for (index, command) in layers.clone().enumerate() {
             match command {
-                Primitive::Motion(_, _, _, path) => {
+                Primitive::Motion(scale, _, rows, path) => {
                     let sample = MotionSample::new(path.len(), elapsed, duration);
-                    poses[index].0 = sample.position(|i, axis| path[i][axis]);
+                    let position = sample.position(|i, axis| path[i][axis]).map(i32::from);
+                    poses[index] = Some((position, None));
+                    active |= row_mask(sprite_rows(position, *scale, rows.len()));
                 }
-                Primitive::OccludedMotion(_, _, _, circle, points) => {
+                Primitive::OccludedMotion(scale, _, rows, circle, points) => {
                     let sample = MotionSample::new(points.0.len() / 3, elapsed, duration);
                     let point = |i, axis| points.0[i * 3 + axis];
-                    let position = sample.position(point);
+                    let position = sample.position(point).map(i32::from);
                     let occlusion = (sample.axis(|i| point(i, 2)) < 128 * 256).then_some(*circle);
-                    poses[index] = (position, occlusion);
+                    poses[index] = Some((position, occlusion));
+                    active |= row_mask(sprite_rows(position, *scale, rows.len()));
+                }
+                Primitive::ViewportMotion(scale, _, rows, [x, y, width, height, samples], path) => {
+                    let count = path.0.len() / 2;
+                    let sample = MotionSample::new(usize::from(*samples), elapsed, duration);
+                    // The path only contains the part of the orbit near this view.
+                    if sample.points[1] < count - 1
+                        || (sample.points[1] == count - 1 && sample.fraction == 0)
+                    {
+                        let [px, py] =
+                            sample.position(|i, axis| path.0[i.min(count - 1) * 2 + axis]);
+                        let position = [px, py].map(i32::from);
+                        let position = [
+                            position[0] + (i32::from(*x) - 64) * 256,
+                            position[1] + (i32::from(*y) - 64) * 256,
+                        ];
+                        let left = position[0] >> 8;
+                        if left < i32::from(*x) + i32::from(*width)
+                            && left + 16 * i32::from(*scale) >= i32::from(*x)
+                        {
+                            poses[index] = Some((position, None));
+                            let sprite = sprite_rows(position, *scale, rows.len());
+                            let top = usize::from(*y);
+                            active |= row_mask(
+                                sprite.start.max(top)..sprite.end.min(top + usize::from(*height)),
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -138,16 +175,46 @@ impl<'d> Display<'d> {
             let width = text_width(&line.text);
             let period = width + SCROLL_GAP;
             let offset = if width > usize::from(line.width) {
+                let top = usize::from(line.top);
+                active |= row_mask(top..top + FONT_HEIGHT);
                 ((time * u64::from(line.speed) / 1000) % period as u64) as usize
             } else {
                 0
             };
             (line, offset, period)
         });
-        self.draw_rows(|y, row| {
+        let mut dirty = if full {
+            u64::MAX
+        } else {
+            self.animation_rows | active
+        };
+        if clock.is_some_and(|(_, _, changed)| changed) {
+            dirty |= row_mask(0..FONT_HEIGHT);
+        }
+
+        // Redraw both sprite footprints to erase the previous frame without touching static rows.
+        let mut fill = |y, row: &mut Scanline| {
             row.fill(0);
             for (index, command) in layers.clone().enumerate() {
                 paint_graphic(row, y, command, poses[index]);
+            }
+            if let Some((label, text, _)) = clock
+                && y < FONT_HEIGHT
+            {
+                let right = usize::from(label.right);
+                let left = right - text_width("00:00");
+                for x in left..right {
+                    set_pixel(row, x, 0);
+                }
+                paint_text(
+                    row,
+                    text,
+                    y,
+                    1,
+                    label.shade,
+                    right - text_width(text)..right,
+                    0,
+                );
             }
             if let Some((line, offset, period)) = marquee
                 && (usize::from(line.top)..usize::from(line.top) + FONT_HEIGHT).contains(&y)
@@ -169,11 +236,19 @@ impl<'d> Display<'d> {
                     paint_text(row, &line.text, glyph_row, 1, line.shade, wrap..right, 0);
                 }
             }
-        })
+        };
+        while dirty != 0 {
+            let start = dirty.trailing_zeros() as usize;
+            let end = start + (dirty >> start).trailing_ones() as usize;
+            self.draw_rows(start..end, &mut fill)?;
+            dirty &= !row_mask(start..end);
+        }
+        self.animation_rows = active;
+        Ok(())
     }
 
     fn draw(&mut self, pixel: impl Fn(usize, usize) -> u8) -> Result<(), Error> {
-        self.draw_rows(|y, row| {
+        self.draw_rows(0..HEIGHT, |y, row| {
             for (pair, byte) in row.iter_mut().enumerate() {
                 let x = WIDTH - 1 - pair * 2;
                 *byte = pixel(x, y) << 4 | pixel(x - 1, y);
@@ -181,22 +256,33 @@ impl<'d> Display<'d> {
         })
     }
 
-    fn draw_rows(&mut self, fill: impl FnMut(usize, &mut Scanline)) -> Result<(), Error> {
+    fn draw_rows(
+        &mut self,
+        rows: Range<usize>,
+        fill: impl FnMut(usize, &mut Scanline),
+    ) -> Result<(), Error> {
         self.chip_select.set_low();
-        let result = self.write_screen(fill);
+        let result = self.write_screen(rows, fill);
         self.chip_select.set_high();
         result
     }
 
-    fn write_screen(&mut self, mut fill: impl FnMut(usize, &mut Scanline)) -> Result<(), Error> {
+    fn write_screen(
+        &mut self,
+        rows: Range<usize>,
+        mut fill: impl FnMut(usize, &mut Scanline),
+    ) -> Result<(), Error> {
         self.command(0x15, &[0x1c, 0x5b])?; // Four pixels per column address.
-        self.command(0x75, &[0x00, 0x3f])?;
+        self.command(
+            0x75,
+            &[(HEIGHT - rows.end) as u8, (HEIGHT - 1 - rows.start) as u8],
+        )?;
         self.command(0x5c, &[])?;
         self.data_command.set_high();
 
         let mut row = [0; WIDTH / 2];
         // Rotate 180 degrees for the panel's orientation in the case.
-        for y in (0..HEIGHT).rev() {
+        for y in rows.rev() {
             fill(y, &mut row);
             self.spi.write(&row)?;
         }
@@ -212,6 +298,20 @@ impl<'d> Display<'d> {
         }
         Ok(())
     }
+}
+
+fn row_mask(rows: Range<usize>) -> u64 {
+    if rows.is_empty() {
+        return 0;
+    }
+    (u64::MAX << rows.start) & (u64::MAX >> (HEIGHT - rows.end))
+}
+
+fn sprite_rows([_, y]: [i32; 2], scale: u8, height: usize) -> Range<usize> {
+    let top = y >> 8;
+    let edge = i32::from(y & 255 != 0);
+    let bottom = top + height as i32 * i32::from(scale) + edge;
+    top.clamp(0, HEIGHT as i32) as usize..bottom.clamp(0, HEIGHT as i32) as usize
 }
 
 pub fn marquee_scrolls(line: &Marquee) -> bool {
@@ -231,17 +331,17 @@ pub fn page_scrolls(page: &Page) -> bool {
         .any(|row| text_width(&row[1]) > LABEL_WIDTH)
 }
 
-fn page_pixel(page: &Page, shift: usize, x: usize, y: usize) -> u8 {
+fn page_pixel(page: &Page, shift: usize, clock: &str, x: usize, y: usize) -> u8 {
     match y {
         0..=8 => {
             let state = page.state.label();
             let state_left = WIDTH - 2 - text_width(state);
-            let clock_width = text_width(&page.updated);
+            let clock_width = text_width(clock);
             let clock_left = (WIDTH - clock_width) / 2;
             if (2..49).contains(&x) {
                 text_pixel(page.mode.label(), x - 2, y) * 15
             } else if (clock_left..clock_left + clock_width).contains(&x) {
-                text_pixel(&page.updated, x - clock_left, y) * 8
+                text_pixel(clock, x - clock_left, y) * 8
             } else if x >= state_left {
                 text_pixel(state, x - state_left, y) * 11
             } else {
@@ -337,7 +437,7 @@ fn paint_graphic(
     row: &mut Scanline,
     y: usize,
     command: &Primitive,
-    (position, occlusion): ([u16; 2], Option<[u8; 3]>),
+    pose: Option<([i32; 2], Option<[u8; 3]>)>,
 ) {
     match command {
         Primitive::Rectangle(left, top, width, height, shade) => {
@@ -396,8 +496,33 @@ fn paint_graphic(
             }
         }
         Primitive::Motion(scale, shade, rows, _)
-        | Primitive::OccludedMotion(scale, shade, rows, _, _) => {
-            paint_moving_bitmap(row, y, position, i32::from(*scale), *shade, rows, occlusion);
+        | Primitive::OccludedMotion(scale, shade, rows, _, _)
+        | Primitive::ViewportMotion(scale, shade, rows, _, _) => {
+            if let Some((position, occlusion)) = pose {
+                let span =
+                    if let Primitive::ViewportMotion(_, _, _, [x, top, width, height, _], _) =
+                        command
+                    {
+                        if !(usize::from(*top)..usize::from(*top) + usize::from(*height))
+                            .contains(&y)
+                        {
+                            return;
+                        }
+                        i32::from(*x)..i32::from(*x) + i32::from(*width)
+                    } else {
+                        0..WIDTH as i32
+                    };
+                paint_moving_bitmap(
+                    row,
+                    y,
+                    position,
+                    i32::from(*scale),
+                    *shade,
+                    rows,
+                    occlusion,
+                    span,
+                );
+            }
         }
     }
 }
@@ -405,13 +530,14 @@ fn paint_graphic(
 fn paint_moving_bitmap(
     row: &mut Scanline,
     y: usize,
-    [left, top]: [u16; 2],
+    [left, top]: [i32; 2],
     scale: i32,
     shade: u8,
     rows: &[u16],
     occlusion: Option<[u8; 3]>,
+    span: Range<i32>,
 ) {
-    let dy = (y as i32 * 256) - i32::from(top);
+    let dy = y as i32 * 256 - top;
     let sy = dy >> 8;
     if sy < -1 || sy >= rows.len() as i32 * scale {
         return;
@@ -425,8 +551,9 @@ fn paint_moving_bitmap(
     };
     let upper = bits_at(sy);
     let lower = bits_at(sy + 1);
-    let left = i32::from(left);
-    for x in (left >> 8)..((left >> 8) + 16 * scale + 1).min(WIDTH as i32) {
+    let start = left >> 8;
+    let edge = i32::from(left & 255 != 0);
+    for x in start.max(span.start)..(start + 16 * scale + edge).min(span.end) {
         if let Some([cx, cy, radius]) = occlusion {
             let dx = x - i32::from(cx);
             let dy = y as i32 - i32::from(cy);
@@ -506,7 +633,7 @@ fn glyph(code: u8) -> &'static [u8] {
     &STOCK_FONT[start..start + GLYPH_SIZE]
 }
 
-fn text_width(text: &str) -> usize {
+pub fn text_width(text: &str) -> usize {
     text.bytes().map(|code| usize::from(glyph(code)[0])).sum()
 }
 
