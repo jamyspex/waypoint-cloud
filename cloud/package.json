@@ -10,8 +10,10 @@
     "calendar:connect": "node scripts/calendar-connect.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1174.0",
     "@aws-sdk/client-s3": "^3.950.0",
     "@aws-sdk/client-ssm": "^3.950.0",
+    "@aws-sdk/lib-dynamodb": "^3.1174.0",
     "node-html-parser": "^7.1.0",
     "satellite.js": "^6.0.2",
     "sst": "4.17.2",

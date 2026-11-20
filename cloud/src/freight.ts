@@ -1,3 +1,5 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { stanoxNames } from "./stanox-names.js";
 
@@ -9,6 +11,8 @@ export type Report = { stanox: string; event: string; at: number; planned: numbe
 export type FreightTrain = {
   id: string; headcode: string; toc: string; origin?: string; originName?: string; departed?: number;
   last: Report; next?: string; terminated: boolean; path: [stanox: string, at: number][];
+  // Usual terminus learned from earlier runs of the same headcode and origin (see FreightRoutes).
+  destination?: string; destinationStanox?: string; routeChecked?: string; learned?: boolean;
 };
 export type FreightFile = {
   version: 1; updated: number; trains: Record<string, FreightTrain>;
@@ -17,6 +21,9 @@ export type FreightFile = {
 };
 
 const s3 = new S3Client({});
+const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const routesTable = process.env.ROUTES_TABLE;
+const routeLifetime = 60 * 86_400;
 const bucket = process.env.SCENES_BUCKET;
 const key = "feeds/freight-trains.json";
 const keepFor = 6 * 3_600_000;
@@ -82,10 +89,13 @@ export async function handler(event: KafkaEvent) {
       originName: previous?.originName ?? (pending ? stanoxNames[pending[0]] : undefined),
       last: report, next: body.next_report_stanox || undefined, terminated: body.train_terminated === "true",
       path: [...(previous?.path ?? []), [report.stanox, at] as [string, number]].slice(-40),
+      destination: previous?.destination, destinationStanox: previous?.destinationStanox,
+      routeChecked: previous?.routeChecked, learned: previous?.learned,
     };
     applied++;
   }
   const now = Date.now();
+  if (routesTable) await learnRoutes(Object.values(state.trains), now);
   for (const [id, train] of Object.entries(state.trains)) {
     if (now - train.last.at > (train.terminated ? keepTerminated : keepFor)) delete state.trains[id];
   }
@@ -93,4 +103,36 @@ export async function handler(event: KafkaEvent) {
   state.updated = now;
   await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: "application/json", Body: JSON.stringify(state) }));
   console.log("freight: %d reports applied, %d trains tracked", applied, Object.keys(state.trains).length);
+}
+
+// Freight usually runs the same path under the same headcode each day. Each time a train terminates,
+// count that terminus against its headcode and origin (and against the headcode alone, for trains
+// whose activation we missed). New trains then show their most frequent terminus as a destination.
+const routeKeys = (train: FreightTrain) => train.origin ? [`${train.headcode}#${train.origin}`, `${train.headcode}#*`] : [`${train.headcode}#*`];
+
+async function learnRoutes(trains: FreightTrain[], now: number): Promise<void> {
+  const finished = trains.filter((train) => train.terminated && !train.learned);
+  await Promise.all(finished.flatMap((train) => {
+    train.learned = true;
+    return routeKeys(train).map((route) => dynamo.send(new UpdateCommand({
+      TableName: routesTable, Key: { route, terminus: train.last.stanox },
+      UpdateExpression: "ADD runs :one SET lastSeen = :now, expireAt = :expiry",
+      ExpressionAttributeValues: { ":one": 1, ":now": now, ":expiry": Math.floor(now / 1000) + routeLifetime },
+    })));
+  })).catch((error: unknown) => console.warn("freight routes: %s", error instanceof Error ? error.message : "write failed"));
+
+  const unchecked = trains.filter((train) => !train.terminated && train.routeChecked !== routeKeys(train)[0]).slice(0, 40);
+  await Promise.all(unchecked.map(async (train) => {
+    for (const route of routeKeys(train)) {
+      const { Items = [] } = await dynamo.send(new QueryCommand({
+        TableName: routesTable, KeyConditionExpression: "route = :route", ExpressionAttributeValues: { ":route": route },
+      }));
+      const best = Items.sort((a, b) => (b.runs - a.runs) || (b.lastSeen - a.lastSeen))[0];
+      if (best) {
+        Object.assign(train, { destinationStanox: best.terminus, destination: stanoxNames[best.terminus] });
+        break;
+      }
+    }
+    train.routeChecked = routeKeys(train)[0];
+  })).catch((error: unknown) => console.warn("freight routes: %s", error instanceof Error ? error.message : "lookup failed"));
 }

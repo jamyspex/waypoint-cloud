@@ -138,15 +138,22 @@ export default $config({
     // Freight: AWS reads RDM's NWR Train Movements Kafka topic and hands batches to this Lambda,
     // which keeps the latest position of every freight train in feeds/freight-trains.json.
     const trainMovements = aws.secretsmanager.getSecretOutput({ name: `waypoint-terminal/${$app.stage}/rdm-train-movements` });
+    // Learned freight routes: runs per (headcode#origin, terminus), expiring after 60 days unused.
+    const freightRoutes = new sst.aws.Dynamo("FreightRoutes", {
+      fields: { route: "string", terminus: "string" },
+      primaryIndex: { hashKey: "route", rangeKey: "terminus" },
+      ttl: "expireAt",
+    });
     const freight = new sst.aws.Function("FreightMovements", {
       handler: "src/freight.handler",
       runtime: "nodejs22.x",
       timeout: "60 seconds",
       memory: "512 MB",
       concurrency: { reserved: 1 },
-      environment: { SCENES_BUCKET: scenes.name },
+      environment: { SCENES_BUCKET: scenes.name, ROUTES_TABLE: freightRoutes.name },
       permissions: [
         { actions: ["s3:GetObject", "s3:PutObject"], resources: [$interpolate`${scenes.arn}/feeds/freight-trains.json`] },
+        { actions: ["dynamodb:Query", "dynamodb:UpdateItem"], resources: [freightRoutes.arn] },
         { actions: ["secretsmanager:GetSecretValue"], resources: [trainMovements.arn] },
       ],
     });

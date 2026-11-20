@@ -1,17 +1,43 @@
 import { displayText, londonClock, row, type Graphic, type Page } from "./board.js";
 import { textWidth } from "./font.js";
 import type { FreightFile, FreightTrain } from "./freight.js";
-import { freightLocations } from "./freight-locations.js";
+import { freightLocations, type Line } from "./freight-locations.js";
+import { Canvas } from "./sky.js";
 
 const recent = 3 * 3_600_000;
+const maxCards = 6;
+
 // TRUST sector codes (toc_id) for freight and engineering operators, from the Open Rail Data wiki TOC Codes page.
 const operators: Record<string, string> = {
-  "04": "DBC", "05": "DBC", "08": "DBC", "54": "GBRF", "66": "FLR", "11": "FLR", "42": "COLAS", "97": "DRS",
-  "07": "ROG", "09": "HHR", "34": "DCR", "50": "WCR", "89": "LSL", "95": "VRMS", "15": "NR", "31": "NR", "92": "NR",
-  "39": "HRSCO", "40": "BBR", "43": "AMEY", "46": "SBR", "49": "VOLKR", "72": "LEGGE", "17": "H&H", "10": "SERCO",
-  "16": "LORAM", "36": "VINTG", "60": "SR", "35": "CS", "71": "TFW",
+  "04": "DB CARGO", "05": "DB CARGO", "08": "DB CARGO", "54": "GB RAILFREIGHT", "66": "FREIGHTLINER", "11": "FREIGHTLINER",
+  "42": "COLAS RAIL", "97": "DIRECT RAIL SERVICES", "07": "RAIL OPERATIONS GROUP", "09": "HEAVY HAUL RAIL", "34": "DC RAIL",
+  "50": "WEST COAST RAILWAYS", "89": "LOCOMOTIVE SERVICES", "95": "VARAMIS RAIL", "15": "NETWORK RAIL", "31": "NETWORK RAIL",
+  "92": "NETWORK RAIL", "39": "HARSCO", "40": "BALFOUR BEATTY", "43": "AMEY", "46": "SB RAIL", "49": "VOLKERRAIL",
+  "72": "LEGGE", "17": "HANSON & HALL", "10": "SERCO", "16": "LORAM", "36": "VINTAGE TRAINS", "60": "SCOTRAIL",
+  "35": "CALEDONIAN SLEEPER", "71": "TRANSPORT FOR WALES",
 };
-const title = "INVERNESS, FAR NORTH & KYLE";
+const lines: Record<Line, string> = {
+  inverness: "INVERNESS", "far-north": "FAR NORTH LINE", kyle: "KYLE LINE", approach: "HIGHLAND MAIN LINE",
+};
+// A small freight train for the card header: a Class 66-style loco with a container wagon.
+// Each letter is a grey level; "." is blank.
+const trainArt = [
+  "..LLLLLLLLLLLLLL...CCCCCCCCCCC..EEEEEEEEEEE",
+  ".LL..BBBBBBBBBBB...CCCCCCCCCCC..EEEEEEEEEEE",
+  "LL...BBBBBBBBBBB...CCCCCCCCCCC..EEEEEEEEEEE",
+  "LBBBBBBBBBBBBBBB...CCCCCCCCCCC..EEEEEEEEEEE",
+  "YBBBBBBBBBBBBBBB--WWWWWWWWWWWWW-WWWWWWWWWWWW",
+  ".KKKKKKKKKKKKKK....KK.......KK...KK.......KK",
+  "..oo.oo...oo.oo....oo.......oo...oo.......oo",
+];
+const trainShades: Record<string, number> = { L: 15, Y: 15, B: 12, K: 5, o: 9, C: 10, E: 7, W: 5, "-": 5 };
+function trainIcon(left: number, top: number): Graphic[] {
+  return Object.entries(trainShades).flatMap(([letter, shade]) => {
+    const canvas = new Canvas(trainArt[0].length, trainArt.length);
+    trainArt.forEach((line, y) => [...line].forEach((char, x) => { if (char === letter) canvas.set(x, y); }));
+    return canvas.graphic(left, top, shade);
+  });
+}
 
 // Reference names describe sidings and signals ("DAVENTRY RECEP SDGS"); keep the place up to the first technical word.
 const technical = new Set(["LHS", "RHS", "UP", "DN", "DOWN", "RECP", "RECEP", "SDGS", "SDG", "SS", "SIG", "EMU", "FLT", "SHUNT",
@@ -22,7 +48,7 @@ export function placeName(raw: string): string {
   return words.slice(0, end < 0 ? words.length : end).join(" ");
 }
 
-type Sighting = { train: FreightTrain; place: string; event: string; at: number; lateness: string };
+type Sighting = { train: FreightTrain; place: string; line: Line; event: string; at: number; lateness: string };
 
 function lateness(train: FreightTrain): string {
   const minutes = Number.isFinite(train.last.variation) ? Math.round(train.last.variation) : NaN;
@@ -37,53 +63,70 @@ export function freightSightings(file: FreightFile | null, now: number): Sightin
     if (now - train.last.at > (train.terminated ? recent / 3 : recent)) return [];
     const here = freightLocations[train.last.stanox];
     if (here) {
-      const event = train.terminated ? "TERM" : train.last.event === "ARRIVAL" ? "ARR" : "DEP";
-      return [{ train, place: here.name, event, at: train.last.at, lateness: lateness(train) }];
+      const event = train.terminated ? "TERMINATED" : train.last.event === "ARRIVAL" ? "ARRIVED" : "DEPARTED";
+      return [{ train, place: here.name, line: here.line, event, at: train.last.at, lateness: lateness(train) }];
     }
     const next = train.next ? freightLocations[train.next] : undefined;
-    return next && !train.terminated ? [{ train, place: next.name, event: "APPR", at: train.last.at, lateness: lateness(train) }] : [];
-  }).sort((a, b) => b.at - a.at).slice(0, 4);
+    return next && !train.terminated
+      ? [{ train, place: next.name, line: next.line, event: "APPROACHING", at: train.last.at, lateness: lateness(train) }]
+      : [];
+  }).sort((a, b) => b.at - a.at).slice(0, maxCards);
 }
 
-export function freightPage(file: FreightFile | null, nowDate: Date): Page | undefined {
+function fit(text: string, pixels: number, scale = 1): string {
+  while (text && textWidth(text) * scale > pixels) text = text.slice(0, -1);
+  return text.trimEnd();
+}
+
+// The scrolling line: where the train came from, where it usually goes, and where it has been.
+function journey(train: FreightTrain, event: string): string {
+  const parts: string[] = [];
+  if (train.originName && train.origin !== train.last.stanox) {
+    const departed = train.departed && Number.isFinite(train.departed) ? ` ${londonClock.format(train.departed)}` : "";
+    parts.push(`FROM ${placeName(train.originName)}${departed}`);
+  }
+  if (train.destination && train.destinationStanox !== train.last.stanox && !train.terminated) {
+    parts.push(`TO ${placeName(train.destination)}`);
+  }
+  const next = train.next ? freightLocations[train.next] : undefined;
+  if (next && event !== "APPROACHING" && !train.terminated) parts.push(`NEXT ${next.name}`);
+  const earlier = train.path.slice(0, -1).reverse()
+    .flatMap(([stanox, at]) => freightLocations[stanox] ? [`${freightLocations[stanox].name} ${londonClock.format(at)}`] : [])
+    .filter((entry, i, all) => all.indexOf(entry) === i).slice(0, 4);
+  if (earlier.length) parts.push(`EARLIER ${earlier.join(", ")}`);
+  return displayText(parts.join("  -  ") || "NO JOURNEY DETAILS YET", 760);
+}
+
+/** One card per freight train: operator and headcode, where it is now, and a scrolling journey line. */
+export function freightPages(file: FreightFile | null, nowDate: Date): Page[] {
   const now = nowDate.getTime();
   const sightings = freightSightings(file, now);
-  if (!sightings.length) return undefined;
-  const graphics: Graphic[] = [
-    [2, 0, 1, 15, "FREIGHT"], [254 - textWidth("LIVE"), 0, 1, 11, "LIVE"],
-    [2, 9, 1, 15, title], [0, 18, 256, 1, 5], [0, 63, 256, 1, 3],
-  ];
-  // Four 7.5 second phases alternate the middle of each row between where the train is now
-  // and where it set off from, so the 30 second screen shows each twice.
-  const current: Graphic[] = [];
-  const from: Graphic[] = [];
-  sightings.forEach(({ train, place, event, at, lateness: late }, i) => {
-    const top = 21 + i * 10;
-    let name = displayText(place, 18);
-    while (textWidth(name) > 90) name = name.slice(0, -1);
-    let operator = operators[train.toc] ?? "";
-    while (textWidth(operator) > 31) operator = operator.slice(0, -1);
-    graphics.push(
-      [2, top, 1, 15, train.headcode],
-      [30, top, 1, 8, operator],
-      [254 - textWidth(late), top, 1, late.includes("LATE") ? 13 : 9, late],
-    );
-    const here: Graphic[] = [[62, top, 1, event === "APPR" ? 9 : 12, name], [158, top, 1, 10, `${event} ${londonClock.format(at)}`]];
-    current.push(...here);
-    const origin = train.originName ? placeName(train.originName) : undefined;
-    if (!origin || train.origin === train.last.stanox) {
-      from.push(...here);
-      return;
+  return sightings.map(({ train, place, line, event, at, lateness: late }, i): Page => {
+    const headcode = train.headcode;
+    const operator = fit(operators[train.toc] ?? "FREIGHT", 248 - textWidth(headcode) - 52);
+    const location = displayText(place, 20);
+    const big = textWidth(location) * 2 <= 166;
+    const when = `${event} ${londonClock.format(at)}`;
+    const lateScale = textWidth(late) * 2 <= 80 ? 2 : 1;
+    const graphics: Graphic[] = [
+      ...trainIcon(3, 1), [52, 0, 1, 15, operator], [254 - textWidth(headcode), 0, 1, 15, headcode],
+      [0, 9, 256, 1, 6],
+      [3, 12, 1, 8, event === "APPROACHING" ? "APPROACHING" : "NOW AT"],
+      big ? [3, 21, 2, 15, location] : [3, 25, 1, 15, fit(location, 166)],
+      [254 - textWidth(when), 12, 1, 10, when],
+      [254 - textWidth(late) * lateScale, 22 + (lateScale === 1 ? 3 : 0), lateScale, late.includes("LATE") ? 15 : 11, late],
+      [0, 40, 256, 1, 3], [0, 53, 256, 1, 3],
+      [3, 55, 1, 7, lines[line]],
+    ];
+    if (sightings.length > 1) {
+      const count = `${i + 1} OF ${sightings.length}`;
+      graphics.push([254 - textWidth(count), 55, 1, 7, count]);
     }
-    let label = displayText(origin, 24);
-    const room = 254 - textWidth(late) - 8 - (62 + textWidth("FROM "));
-    while (textWidth(label) > room) label = label.slice(0, -1);
-    from.push([62, top, 1, 7, "FROM"], [62 + textWidth("FROM "), top, 1, 12, label.trimEnd()]);
+    return {
+      id: `freight-${i + 1}`, mode: "rail", title: displayText(`FREIGHT ${headcode}`, 26), updated: londonClock.format(now), state: "live",
+      rows: [row(londonClock.format(at), `${headcode} ${place}`, late)],
+      graphics, marquee: { left: 3, top: 43, width: 250, shade: 12, speed: 30, text: journey(train, event) },
+      dwell_seconds: 20,
+    };
   });
-  return {
-    id: "freight", mode: "rail", title: "HIGHLAND FREIGHT", updated: londonClock.format(now), state: "live",
-    rows: sightings.map(({ train, place, at }) => row(londonClock.format(at), `${train.headcode} ${place}`, "")),
-    graphics, animation: { phase_ms: 7500, phases: [current, from, current, from] },
-    clock: { right: 128 + Math.ceil(textWidth("00:00") / 2), shade: 8 },
-  };
 }

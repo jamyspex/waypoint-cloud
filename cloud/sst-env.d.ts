@@ -18,6 +18,10 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Function"
     }
+    "FreightRoutes": {
+      "name": string
+      "type": "sst.aws.Dynamo"
+    }
     "RailFilesLondon": {
       "name": string
       "type": "sst.aws.Bucket"

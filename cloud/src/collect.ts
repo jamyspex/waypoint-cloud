@@ -13,7 +13,7 @@ import { skyPages } from "./sky.js";
 import { weatherScreen } from "./weather.js";
 import { gridScreens } from "./carbon.js";
 import { auroraScreen } from "./aurora.js";
-import { freightPage } from "./freight-screen.js";
+import { freightPages } from "./freight-screen.js";
 import type { FreightFile } from "./freight.js";
 import { reserveAircraftFallback } from "./air-fallback.js";
 
@@ -155,7 +155,7 @@ export async function handler() {
     return undefined;
   });
   const weather = weatherScreen(settings.space, now);
-  const freight = read("feeds/freight-trains.json").then((file) => freightPage(file as FreightFile, now)).catch(() => undefined);
+  const freight = read("feeds/freight-trains.json").then((file) => freightPages(file as FreightFile, now)).catch(() => []);
   const grid = gridScreens(now);
   const aurora = auroraScreen(settings.space, now);
   const buses = settings.buses.slice(0, 4);
@@ -227,7 +227,8 @@ export async function handler() {
   const gridPages = await grid;
   if (gridPages.length) board.grid = gridPages;
   board.aurora = await aurora;
-  board.freight = await freight;
+  const freightCards = await freight;
+  if (freightCards.length) board.freight = freightCards;
   board.liveSpace = (await space)?.liveSpace;
   const screens = screensOf(board);
   if (!isDetailedBoard(board) || Buffer.byteLength(JSON.stringify(board)) > maxDetailedBoardBytes

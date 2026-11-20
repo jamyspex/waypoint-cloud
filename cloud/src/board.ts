@@ -32,7 +32,7 @@ export type LiveOrbitCatalog = {
   lat: number; lon: number; stale: boolean;
   orbits: { name: string; line1: string; line2: string }[];
 };
-export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page };
+export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page[] };
 export const maxBoardBytes = 8192;
 export const maxMarinePhases = 40;
 export const detailedBoardKey = "feeds/waypoint-detailed.json";
@@ -59,7 +59,7 @@ export function screensOf(board: DetailedBoard, notification?: Page, satellites?
     const last = list.map((page) => page.mode).lastIndexOf(mode);
     return last < 0 ? [...list, ...extra] : [...list.slice(0, last + 1), ...extra, ...list.slice(last + 1)];
   };
-  const withGrid = after(after(screens, "rail", board.freight ? [board.freight] : []), "energy", board.grid ?? []);
+  const withGrid = after(after(screens, "rail", board.freight ?? []), "energy", board.grid ?? []);
   return [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...(board.aurora ? [board.aurora] : []),
     ...withGrid, ...(board.marine ?? []), ...(board.sky ?? [])];
 }
@@ -85,7 +85,8 @@ export function isDetailedBoard(value: unknown): value is DetailedBoard {
     && (grid === undefined || (Array.isArray(grid) && inRange(grid.length, 1, 2)
       && grid.every((page) => page?.mode === "energy" && page.id.startsWith("grid-") && validPage(page))))
     && (aurora === undefined || (aurora?.id === "aurora" && validPage(aurora)))
-    && (freight === undefined || (freight?.id === "freight" && validPage(freight)))
+    && (freight === undefined || (Array.isArray(freight) && inRange(freight.length, 1, 6)
+      && freight.every((page) => page?.id.startsWith("freight-") && validPage(page))))
     && (sky === undefined || (Array.isArray(sky) && inRange(sky.length, 1, 5)
       && sky.every((page) => page?.id.startsWith("sky-") && validPage(page))))
     && (meetingFocus === undefined || (Array.isArray(meetingFocus) && meetingFocus.every((meeting) =>
