@@ -118,6 +118,10 @@ impl Board {
         self.dwell(&self.pages[0])
     }
 
+    pub fn page_duration(&self, page: &Page) -> u64 {
+        self.dwell(page)
+    }
+
     pub fn next_page_offset(&self, elapsed: u64) -> u64 {
         let (_, page, within, _) = self.page_at(elapsed);
         elapsed - within + self.dwell(page)
@@ -207,6 +211,27 @@ pub struct Page {
     pub clock: Option<ClockLabel>,
     pub starts_at: Option<u64>,
     pub dwell_seconds: Option<u8>,
+    /// Where to draw the time-left bar: usually the line under the screen's title.
+    pub progress: Option<Progress>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Progress {
+    pub top: u8,
+    pub left: u8,
+    pub width: u16,
+    pub shade: u8,
+}
+
+impl Progress {
+    fn valid(&self) -> bool {
+        self.top < 64 && self.width > 0 && u16::from(self.left) + self.width <= 256 && self.shade <= 15
+    }
+
+    /// Pixels of the bar filled after `elapsed` of `duration` milliseconds.
+    pub fn filled(&self, elapsed: u64, duration: u64) -> usize {
+        (u64::from(self.width) * elapsed / duration.max(1)).min(u64::from(self.width)) as usize
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +290,11 @@ pub enum Primitive {
     PackedBitmap(u8, u8, u8, u8, u8, u8, HexBytes),
     OccludedMotion(u8, u8, Vec<u16>, [u8; 3], HexBytes),
     ViewportMotion(u8, u8, Vec<u16>, [u8; 5], HexBytes),
+    /// A looping sprite: left, top, scale, shade, frames of bitmap rows, and milliseconds per frame.
+    Frames(u8, u8, u8, u8, Vec<Vec<u16>>, u16),
+    /// A looping sprite that also follows a path: scale, shade, frames, path points, milliseconds per frame.
+    /// Path coordinates are offset by 32 so a sprite can start or finish off screen (0 means x or y = -32).
+    MotionFrames(u8, u8, Vec<Vec<u16>>, Vec<[u8; 2]>, u16),
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,6 +359,23 @@ impl Primitive {
                     && path.0.len() % 3 == 0
                     && (6..=72).contains(&path.0.len())
                     && path.0.chunks_exact(3).all(|point| point[1] < 64)
+            }
+            Self::Frames(_, y, scale, shade, frames, frame_ms) => {
+                *y < 64
+                    && (1..=4).contains(scale)
+                    && *shade <= 15
+                    && (1..=16).contains(&frames.len())
+                    && frames.iter().all(|rows| (1..=32).contains(&rows.len()))
+                    && (50..=5000).contains(frame_ms)
+            }
+            Self::MotionFrames(scale, shade, frames, path, frame_ms) => {
+                (1..=4).contains(scale)
+                    && *shade <= 15
+                    && (1..=16).contains(&frames.len())
+                    && frames.iter().all(|rows| (1..=32).contains(&rows.len()))
+                    && (2..=24).contains(&path.len())
+                    && path.iter().all(|[_, y]| *y < 128)
+                    && (50..=5000).contains(frame_ms)
             }
             Self::ViewportMotion(scale, shade, rows, [x, y, width, height, samples], path) => {
                 (1..=4).contains(scale)
@@ -427,6 +474,7 @@ impl Content {
                                 .dwell_seconds
                                 .is_none_or(|seconds| (5..=120).contains(&seconds))
                             && page.marquee.as_ref().is_none_or(Marquee::valid)
+                            && page.progress.as_ref().is_none_or(Progress::valid)
                             && page
                                 .clock
                                 .as_ref()

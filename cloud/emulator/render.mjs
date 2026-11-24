@@ -114,6 +114,17 @@ export function createRenderer(context, font) {
   function drawCommand(command, time, duration) {
     const [x, y, a, b, c] = command;
     if (command.length === 7) drawPacked(...command);
+    else if (command.length === 6) {
+      // Looping sprite frames, as in the firmware's Frames primitive.
+      const frames = command[4];
+      stationaryBitmap(x, y, a, b, frames[Math.floor(time / command[5]) % frames.length]);
+    }
+    else if (Array.isArray(a) && Array.isArray(a[0])) {
+      // Looping sprite on a path (firmware MotionFrames); path coordinates are offset by 32.
+      const frames = a;
+      const path = b.map(([px, py]) => [px - 32, py - 32]);
+      drawMotion([x, y, frames[Math.floor(time / c) % frames.length], path], time, duration);
+    }
     else if (Array.isArray(b)) drawMotion(command, time, duration);
     else if (typeof c === "number") rect(x, y, a, b, c);
     else if (typeof c === "string") text(x, y, a, b, c);
@@ -179,6 +190,14 @@ export function createRenderer(context, font) {
       }
       marquee(page.marquee, visibleTime);
     } else fallback(page, elapsed, time);
+    if (page.progress) {
+      // Time-left bar on the title line, as drawn by the firmware: a bright two-pixel head.
+      const total = page.animation ? page.animation.phase_ms * page.animation.phases.length : (page.dwell_seconds ?? 60) * 1000;
+      const { top, left, width: span, shade } = page.progress;
+      const filled = Math.min(span, Math.floor(span * elapsed / total));
+      rect(left, top, Math.max(0, filled - 2), 1, shade);
+      if (filled) rect(left + Math.max(0, filled - 2), top, Math.min(2, filled), 1, 15);
+    }
     context.putImageData(image, 0, 0);
   };
 }

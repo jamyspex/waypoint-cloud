@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { displayText, londonClock, row, type Graphic, type Page, type Row } from "./board.js";
 import { textWidth } from "./font.js";
 import { airPresentation, type Aircraft, isMilitary } from "./air.js";
+import { fr24Lookups } from "./fr24.js";
+import { anchorOf, type Subject } from "./context.js";
 import { railPresentation, type Train } from "./rail.js";
 
 export type Settings = {
@@ -120,7 +122,26 @@ async function aircraftSnapshot(path: string, reserveFallback: () => Promise<boo
   }
 }
 
-export async function nearbyAircraft(settings: Settings["air"], reserveFallback: () => Promise<boolean>) {
+// What the "did you know" research is about for an aircraft card: the airframe, or the type for
+// military aircraft without a registration.
+function aircraftSubject(a: Aircraft, known?: { route?: { callsign_iata?: string | null; origin?: { name?: string; municipality?: string | null }; destination?: { name?: string; municipality?: string | null } }; airline?: string }): Subject | undefined {
+  const registration = (a.r ?? "").trim().toUpperCase();
+  const hex = (a.hex ?? "").trim().toUpperCase();
+  const type = (a.t ?? "").trim().toUpperCase();
+  const key = registration ? `aircraft#${registration}` : isMilitary(a) && type ? `type#${type}` : hex ? `aircraft#${hex}` : "";
+  if (!key) return;
+  const route = known?.route;
+  return {
+    key, kind: "aircraft", label: (a.flight ?? "").trim() || registration || type,
+    anchor: anchorOf({
+      callsign: a.flight?.trim(), flight: route?.callsign_iata, airline: known?.airline, operator: a.ownOp,
+      from: route?.origin?.municipality || route?.origin?.name, to: route?.destination?.municipality || route?.destination?.name,
+      type: a.desc || type, registration, military: isMilitary(a) ? "yes" : undefined,
+    }),
+  };
+}
+
+export async function nearbyAircraft(settings: Settings["air"], reserveFallback: () => Promise<boolean>, fr24Token?: string) {
   const { lat, lon } = settings;
   const radius = Math.max(milAircraftRadius, aircraftRadius);
   const snapshot = await aircraftSnapshot(`/lat/${lat.toFixed(4)}/lon/${lon.toFixed(4)}/dist/${radius}`, reserveFallback);
@@ -145,10 +166,12 @@ export async function nearbyAircraft(settings: Settings["air"], reserveFallback:
   }
   const contacts = [...unique];
   const deadline = AbortSignal.timeout(4500);
+  const known = await fr24Lookups(fr24Token, contacts.map(([, { a }]) => a.flight ?? ""), AbortSignal.timeout(3000));
   const cards = [];
   for (let i = 0; i < contacts.length; i += 4) {
     cards.push(...await Promise.all(contacts.slice(i, i + 4).map(async ([id, { a, distance }]) => ({
-      id, ...await airPresentation(a, distance, deadline),
+      id, ...await airPresentation(a, distance, deadline, known.get((a.flight ?? "").trim().toUpperCase())),
+      subject: aircraftSubject(a, known.get((a.flight ?? "").trim().toUpperCase())),
     }))));
   }
   return cards;

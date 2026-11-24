@@ -3,6 +3,7 @@ import { textWidth } from "./font.js";
 import { chartHeight, charts, chartWidth } from "./marine-charts.js";
 import { aisHeaders, aisVesselsUrl, previousPorts, reportedVoyage, shipType } from "./marine-voyage.js";
 import { packedBitmap } from "./packed.js";
+import { anchorOf, type Wanted } from "./context.js";
 
 const maxAge = 30 * 60_000;
 const chartLeft = 148;
@@ -157,7 +158,19 @@ function marinePage(area: Area, contacts: Contact[] | undefined, now: Date, port
   return page;
 }
 
-export async function marinePages(now: Date): Promise<Page[]> {
+function vesselSubjects(areaId: string, areaTitle: string, contacts: Contact[]): Wanted[] {
+  return contacts.slice(0, 6).map((contact) => ({
+    parentId: areaId,
+    subject: {
+      key: `vessel#${contact.mmsi}`, kind: "vessel", label: contact.name,
+      anchor: anchorOf({ name: contact.name, mmsi: contact.mmsi, type: contact.type, destination: contact.destination,
+        origin: contact.origin, route: contact.route, area: areaTitle, speed: contact.speed === undefined ? undefined : `${contact.speed} knots` }),
+    },
+  }));
+}
+
+/** The marine cards, plus each card's vessels as subjects for "did you know" screens. */
+export async function marinePages(now: Date): Promise<{ pages: Page[]; wanted: Wanted[] }> {
   try {
     const url = new URL(aisVesselsUrl);
     url.searchParams.set("bbox", feedBounds.join(","));
@@ -169,10 +182,14 @@ export async function marinePages(now: Date): Promise<Page[]> {
     if (!response.ok) throw new Error(`AIS HTTP ${response.status}`);
     const contacts = contactsOf(await response.json(), now).filter((contact) => coverage.some((bounds) => inside(contact, bounds)));
     const ports = await previousPorts(contacts, now);
-    return areas.map((area) => marinePage(area, contacts.filter((contact) => area.id === "marine-cromarty"
-      ? inCromarty(contact) : inside(contact, area.chart.bounds) && !inCromarty(contact)), now, ports));
+    const byArea = areas.map((area) => ({ area, list: contacts.filter((contact) => area.id === "marine-cromarty"
+      ? inCromarty(contact) : inside(contact, area.chart.bounds) && !inCromarty(contact)) }));
+    return {
+      pages: byArea.map(({ area, list }) => marinePage(area, list, now, ports)),
+      wanted: byArea.flatMap(({ area, list }) => vesselSubjects(area.id, area.title, list)),
+    };
   } catch (error) {
     console.warn("marine: %s", error instanceof Error ? error.message : "fetch error");
-    return areas.map((area) => marinePage(area, undefined, now));
+    return { pages: areas.map((area) => marinePage(area, undefined, now)), wanted: [] };
   }
 }

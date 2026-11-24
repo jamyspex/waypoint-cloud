@@ -13,7 +13,11 @@ import { skyPages } from "./sky.js";
 import { weatherScreen } from "./weather.js";
 import { gridScreens } from "./carbon.js";
 import { auroraScreen } from "./aurora.js";
-import { freightPages } from "./freight-screen.js";
+import { freightPages, freightWanted } from "./freight-screen.js";
+import { contextFacts, satelliteSubject, type Wanted } from "./context.js";
+import { contextPage } from "./context-screen.js";
+import { costsPage } from "./costs-screen.js";
+import { liveTargets } from "./live-space.js";
 import type { FreightFile } from "./freight.js";
 import { reserveAircraftFallback } from "./air-fallback.js";
 
@@ -27,6 +31,7 @@ const bucket = process.env.SCENES_BUCKET;
 const settingsParameter = process.env.FEED_SETTINGS;
 const railParameter = process.env.RAIL_API_KEY;
 const octopusParameter = process.env.OCTOPUS_API_KEY;
+const fr24Parameter = process.env.FR24_API_TOKEN;
 const calendarPrefix = process.env.CALENDAR_PREFIX;
 
 async function read(key: string): Promise<unknown> {
@@ -118,7 +123,7 @@ export async function handler() {
   if (!settingsParameter || !railParameter || !bucket) throw new Error("Collector settings missing");
   const now = new Date();
   const updated = londonClock.format(now);
-  const parameterNames = octopusParameter ? [settingsParameter, railParameter, octopusParameter] : [settingsParameter, railParameter];
+  const parameterNames = [settingsParameter, railParameter, octopusParameter, fr24Parameter].filter((name): name is string => Boolean(name));
   const [previous, { Parameters }] = await Promise.all([
     read(detailedBoardKey).catch(() => read(boardKey).catch(() => null)),
     ssm.send(new GetParametersCommand({ Names: parameterNames, WithDecryption: true })),
@@ -144,9 +149,13 @@ export async function handler() {
   const oldPages = isBoard(previous) ? new Map(previous.pages.map((p) => [p.id, p])) : new Map<string, Page>();
   const previousAircraft = isDetailedBoard(previous) ? previous.aircraft ?? [] : [];
   const airTitle = `AIRCRAFT WITHIN ${aircraftRadius} NM`;
-  const aircraft = nearbyAircraft(settings.air, () => reserveAircraftFallback(s3, bucket)).then((cards) => cards.map((card): Page => ({
-    ...card, mode: "air", updated, state: "live", dwell_seconds: 30,
-  }))).catch((error: unknown) => {
+  const fr24Token = Parameters?.find((parameter) => parameter.Name === fr24Parameter)?.Value;
+  // Subjects for "did you know" screens, gathered from the cards as they are built.
+  const wanted: Wanted[] = [];
+  const aircraft = nearbyAircraft(settings.air, () => reserveAircraftFallback(s3, bucket), fr24Token).then((cards) => cards.map(({ subject, ...card }): Page => {
+    if (subject) wanted.push({ parentId: card.id, subject });
+    return { ...card, mode: "air", updated, state: "live", dwell_seconds: 30 };
+  })).catch((error: unknown) => {
     console.warn("air: %s", error instanceof Error ? error.message : "fetch error");
     return previousAircraft.length ? previousAircraft.map((page): Page => ({ ...page, state: "stale" })) : null;
   });
@@ -157,7 +166,10 @@ export async function handler() {
     return undefined;
   });
   const weather = weatherScreen(settings.space, now);
-  const freight = read("feeds/freight-trains.json").then((file) => freightPages(file as FreightFile, now)).catch(() => []);
+  const freight = read("feeds/freight-trains.json").then((file) => {
+    wanted.push(...freightWanted(file as FreightFile, now));
+    return freightPages(file as FreightFile, now);
+  }).catch(() => []);
   const grid = gridScreens(now);
   const aurora = auroraScreen(settings.space, now);
   const buses = settings.buses.slice(0, 4);
@@ -223,7 +235,8 @@ export async function handler() {
   });
   const basePages = [...pages, ...combineEnergyDays(await energy)];
   const board: DetailedBoard = { version: 2, rotation: 60, pages: basePages.map(withGraphics), ...await calendar,
-    aircraft: [...ordered, ...remaining.values()].map(withGraphics), marine: await marine };
+    aircraft: [...ordered, ...remaining.values()].map(withGraphics), marine: (await marine).pages };
+  wanted.push(...(await marine).wanted);
   const skyScreens = [...(await weather ? [(await weather)!] : []), ...(await sky ?? [])];
   if (skyScreens.length) board.sky = skyScreens;
   const gridPages = await grid;
@@ -232,6 +245,27 @@ export async function handler() {
   const freightCards = await freight;
   if (freightCards.length) board.freight = freightCards;
   board.liveSpace = (await space)?.liveSpace;
+  if (board.liveSpace) {
+    // Satellites up now; their context is shown only while they are still live when the device asks.
+    for (const target of liveTargets(board.liveSpace, now.getTime())) {
+      const line1 = board.liveSpace.orbits.find((orbit) => orbit.line1.slice(2, 7).trim() === target.record.satnum.trim())?.line1;
+      wanted.push({ parentId: target.page.id, subject: satelliteSubject(target.page.title, target.record.satnum,
+        target.record.inclo * 180 / Math.PI, target.iss, line1) });
+    }
+  }
+  const modes: Record<string, Page["mode"]> = { aircraft: "air", vessel: "marine", freight: "rail", satellite: "space" };
+  const context = await contextFacts(wanted, now.getTime()).catch((error: unknown) => {
+    console.warn("context: %s", error instanceof Error ? error.message : "lookup failed");
+    return new Map();
+  });
+  if (context.size) {
+    board.context = Object.fromEntries([...context].map(([parentId, { subject, facts }]) =>
+      [parentId, contextPage({ id: parentId, mode: modes[subject.kind] }, subject, facts, now.getTime())]));
+  }
+  board.costs = await costsPage(now).catch((error: unknown) => {
+    console.warn("costs: %s", error instanceof Error ? error.message : "read failed");
+    return undefined;
+  });
   const screens = screensOf(board);
   if (!isDetailedBoard(board) || Buffer.byteLength(JSON.stringify(board)) > maxDetailedBoardBytes
     || Buffer.byteLength(JSON.stringify(screenIndex(screens))) > maxBoardBytes

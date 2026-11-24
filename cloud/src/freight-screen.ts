@@ -3,6 +3,7 @@ import { textWidth } from "./font.js";
 import type { FreightFile, FreightTrain } from "./freight.js";
 import { freightLocations, type Line } from "./freight-locations.js";
 import { Canvas } from "./sky.js";
+import { anchorOf, type Wanted } from "./context.js";
 
 const recent = 3 * 3_600_000;
 const maxCards = 6;
@@ -129,4 +130,18 @@ export function freightPages(file: FreightFile | null, nowDate: Date): Page[] {
       dwell_seconds: 20,
     };
   });
+}
+
+/** Each freight card's working, as a subject for "did you know" research. */
+export function freightWanted(file: FreightFile | null, nowDate: Date): Wanted[] {
+  return freightSightings(file, nowDate.getTime()).map(({ train, place, line }, i) => ({
+    parentId: `freight-${i + 1}`,
+    subject: {
+      key: `freight#${train.headcode}#${train.origin ?? "unknown"}`, kind: "freight", label: train.headcode,
+      anchor: anchorOf({
+        headcode: train.headcode, operator: operators[train.toc], from: train.originName ? placeName(train.originName) : undefined,
+        "usual destination": train.destination ? placeName(train.destination) : undefined, "seen at": place, line: lines[line],
+      }),
+    },
+  }));
 }

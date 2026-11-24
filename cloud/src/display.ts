@@ -1,7 +1,7 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
 import { createHash } from "node:crypto";
-import { detailedBoardKey, isBoard, isDetailedBoard, maxBoardBytes, maxDetailedBoardBytes, screenId, screenIndex, screensOf } from "./board.js";
+import { detailedBoardKey, isBoard, isDetailedBoard, maxBoardBytes, maxDetailedBoardBytes, screenId, screenIndex, screensOf, withProgress } from "./board.js";
 import { meetingFocusPage } from "./calendar.js";
 import { liveSatellitePage, liveTargets } from "./live-space.js";
 
@@ -54,7 +54,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const expected = Number(event.queryStringParameters?.at);
       const time = Number.isSafeInteger(expected) && expected >= now - 2000 && expected <= now + 30_000 ? expected : now;
       const catalog = decoded.liveSpace;
-      const targets = catalog && (view === "index" || id?.startsWith("space-")) ? liveTargets(catalog, time) : undefined;
+      // Satellite screens and their "did you know" screens (ctx-space-…) both need the live targets.
+      const targets = catalog && (view === "index" || /^(ctx-)?space-/.test(id ?? "")) ? liveTargets(catalog, time) : undefined;
       const screens = screensOf(decoded, meetingFocusPage(decoded.meetingFocus, new Date(now)), targets?.map(({ page }) => page));
       if (view === "index") {
         value = screenIndex(screens);
@@ -62,7 +63,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         const satellite = targets?.find(({ page }) => page.id === id);
         const page = satellite && catalog ? liveSatellitePage(satellite, catalog, time) : screens.find((screen) => screen.id === id);
         if (!page) return { statusCode: 404, body: "Screen unavailable" };
-        value = { version: 2, rotation: decoded.rotation, pages: [page] };
+        value = { version: 2, rotation: decoded.rotation, pages: [withProgress(page)] };
       }
     } else if (view === "live") {
       if (!isBoard(decoded)) throw new Error("Invalid feed board");

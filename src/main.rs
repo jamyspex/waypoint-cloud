@@ -138,6 +138,7 @@ async fn display_task(mut display: Display<'static>) {
     let mut marquee_offset = 0;
     let mut last_frame: Option<(usize, usize, Option<usize>)> = None;
     let mut last_clock = None;
+    let mut last_progress: Option<usize> = None;
     // Set while the cloud task fetches a screen the button skipped to.
     // (started, API error, skipping a whole section)
     let mut loading: Option<(Instant, Option<&'static str>, bool)> = None;
@@ -269,6 +270,12 @@ async fn display_task(mut display: Display<'static>) {
                 }
                 let (index, page, elapsed_on_page, visible_time) =
                     board.page_at(timeline_elapsed.unwrap_or(board_offset + elapsed_ms));
+                // Time-left bar: pixels filled so far on this screen.
+                let filled = page
+                    .progress
+                    .as_ref()
+                    .map_or(0, |bar| bar.filled(elapsed_on_page, board.page_duration(page)));
+                let progress_changed = last_progress != Some(filled) || last_frame.is_none();
                 if page.graphics.is_some() || page.animation.is_some() || page.marquee.is_some() {
                     let commands = page.graphics.as_deref().unwrap_or_default();
                     let (phase, phase_index, time, duration) =
@@ -290,6 +297,8 @@ async fn display_task(mut display: Display<'static>) {
                             Primitive::Motion(..)
                                 | Primitive::OccludedMotion(..)
                                 | Primitive::ViewportMotion(..)
+                                | Primitive::Frames(..)
+                                | Primitive::MotionFrames(..)
                         )
                     }) || page.marquee.as_ref().is_some_and(display::marquee_scrolls);
                     let tick = moving.then_some((elapsed_on_page / 17) as usize);
@@ -300,7 +309,10 @@ async fn display_task(mut display: Display<'static>) {
                     let full = last_frame.is_none_or(|(previous, previous_phase, _)| {
                         previous != index || previous_phase != phase_index
                     });
-                    if last_frame != Some(frame) || (page.clock.is_some() && clock_changed) {
+                    if last_frame != Some(frame)
+                        || (page.clock.is_some() && clock_changed)
+                        || (page.progress.is_some() && progress_changed)
+                    {
                         let draw_started = Instant::now();
                         let marquee = page.marquee.as_ref().map(|line| {
                             (line, (marquee_offset + visible_time).saturating_sub(600))
@@ -315,6 +327,7 @@ async fn display_task(mut display: Display<'static>) {
                                 page.clock
                                     .as_ref()
                                     .map(|layout| (layout, clock_text, clock_changed)),
+                                page.progress.as_ref().map(|bar| (bar, filled, progress_changed)),
                                 full,
                             )
                             .expect("OLED graphics page");
@@ -339,6 +352,7 @@ async fn display_task(mut display: Display<'static>) {
                             }
                         }
                         last_frame = Some(frame);
+                        last_progress = Some(filled);
                     }
                 } else if matches!(page.mode, Mode::Air) {
                     let frame = (index, 0, None);
@@ -354,7 +368,7 @@ async fn display_task(mut display: Display<'static>) {
                         0
                     };
                     let frame = (index, 0, Some(shift));
-                    if last_frame != Some(frame) || clock_changed {
+                    if last_frame != Some(frame) || clock_changed || (page.progress.is_some() && progress_changed) {
                         if last_frame.is_none_or(|(previous, _, _)| previous != index) {
                             println!(
                                 "Showing {} / {} ({})",
@@ -364,9 +378,10 @@ async fn display_task(mut display: Display<'static>) {
                             );
                         }
                         display
-                            .show_page(page, shift, clock_text)
+                            .show_page(page, shift, clock_text, filled)
                             .expect("OLED board page");
                         last_frame = Some(frame);
+                        last_progress = Some(filled);
                     }
                 }
             }

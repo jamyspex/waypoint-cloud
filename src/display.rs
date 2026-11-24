@@ -4,7 +4,7 @@ use esp_hal::Blocking;
 use esp_hal::gpio::Output;
 use esp_hal::spi::{Error, master::Spi};
 
-use crate::scene::{ClockLabel, Marquee, Page, Primitive, State};
+use crate::scene::{ClockLabel, Marquee, Page, Primitive, Progress, State};
 
 const WIDTH: usize = 256;
 const HEIGHT: usize = 64;
@@ -79,8 +79,14 @@ impl<'d> Display<'d> {
         self.draw(|x, y| brightness(title, status, scroll, x, y))
     }
 
-    pub fn show_page(&mut self, page: &Page, shift: usize, clock: &str) -> Result<(), Error> {
-        self.draw(|x, y| page_pixel(page, shift, clock, x, y))
+    pub fn show_page(&mut self, page: &Page, shift: usize, clock: &str, filled: usize) -> Result<(), Error> {
+        self.draw(|x, y| {
+            let shade = page_pixel(page, shift, clock, x, y);
+            match &page.progress {
+                Some(bar) if y == usize::from(bar.top) => progress_shade(bar, filled, x).unwrap_or(shade),
+                _ => shade,
+            }
+        })
     }
 
     pub fn show_aircraft(&mut self, page: &Page) -> Result<(), Error> {
@@ -120,13 +126,31 @@ impl<'d> Display<'d> {
         duration: u64,
         marquee: Option<(&Marquee, u64)>,
         clock: Option<(&ClockLabel, &str, bool)>,
+        progress: Option<(&Progress, usize, bool)>,
         full: bool,
     ) -> Result<(), Error> {
         let layers = commands.iter().chain(phase);
         let mut poses = [None; 48];
+        let mut frames_at = [0usize; 48];
         let mut active = 0;
         for (index, command) in layers.clone().enumerate() {
             match command {
+                Primitive::Frames(_, top, scale, _, frames, frame_ms) => {
+                    // The sprite's rows change every frame.
+                    frames_at[index] = (elapsed / u64::from(*frame_ms)) as usize % frames.len();
+                    let height = frames.iter().map(|rows| rows.len()).max().unwrap_or(0) * usize::from(*scale);
+                    let top = usize::from(*top);
+                    active |= row_mask(top..(top + height).min(64));
+                }
+                Primitive::MotionFrames(scale, _, frames, path, frame_ms) => {
+                    let sample = MotionSample::new(path.len(), elapsed, duration);
+                    // Undo the 32 pixel offset that lets paths start off screen.
+                    let position = sample.position(|i, axis| path[i][axis]).map(|value| i32::from(value) - 32 * 256);
+                    poses[index] = Some((position, None));
+                    frames_at[index] = (elapsed / u64::from(*frame_ms)) as usize % frames.len();
+                    let height = frames.iter().map(|rows| rows.len()).max().unwrap_or(0);
+                    active |= row_mask(sprite_rows(position, *scale, height));
+                }
                 Primitive::Motion(scale, _, rows, path) => {
                     let sample = MotionSample::new(path.len(), elapsed, duration);
                     let position = sample.position(|i, axis| path[i][axis]).map(i32::from);
@@ -191,12 +215,19 @@ impl<'d> Display<'d> {
         if clock.is_some_and(|(_, _, changed)| changed) {
             dirty |= row_mask(0..FONT_HEIGHT);
         }
+        if let Some((bar, _, true)) = progress {
+            let top = usize::from(bar.top);
+            dirty |= row_mask(top..top + 1);
+        }
 
         // Redraw both sprite footprints to erase the previous frame without touching static rows.
         let mut fill = |y, row: &mut Scanline| {
             row.fill(0);
             for (index, command) in layers.clone().enumerate() {
-                paint_graphic(row, y, command, poses[index]);
+                paint_graphic(row, y, command, poses[index], frames_at[index]);
+            }
+            if let Some((bar, filled, _)) = progress {
+                paint_progress(row, y, bar, filled);
             }
             if let Some((label, text, _)) = clock
                 && y < FONT_HEIGHT
@@ -331,6 +362,25 @@ pub fn page_scrolls(page: &Page) -> bool {
         .any(|row| text_width(&row[1]) > LABEL_WIDTH)
 }
 
+/// The time-left bar fills the title line from the left, with a bright two-pixel head.
+fn progress_shade(bar: &Progress, filled: usize, x: usize) -> Option<u8> {
+    let left = usize::from(bar.left);
+    if x < left || x >= left + filled {
+        return None;
+    }
+    Some(if x + 2 >= left + filled { 15 } else { bar.shade })
+}
+
+fn paint_progress(row: &mut Scanline, y: usize, bar: &Progress, filled: usize) {
+    if y == usize::from(bar.top) {
+        for x in usize::from(bar.left)..(usize::from(bar.left) + filled).min(WIDTH) {
+            if let Some(shade) = progress_shade(bar, filled, x) {
+                set_pixel(row, x, shade);
+            }
+        }
+    }
+}
+
 fn page_pixel(page: &Page, shift: usize, clock: &str, x: usize, y: usize) -> u8 {
     match y {
         0..=8 => {
@@ -438,6 +488,7 @@ fn paint_graphic(
     y: usize,
     command: &Primitive,
     pose: Option<([i32; 2], Option<[u8; 3]>)>,
+    frame: usize,
 ) {
     match command {
         Primitive::Rectangle(left, top, width, height, shade) => {
@@ -463,6 +514,25 @@ fn paint_graphic(
                     usize::from(*left)..WIDTH,
                     0,
                 );
+            }
+        }
+        Primitive::MotionFrames(scale, shade, frames, _, _) => {
+            if let Some((position, _)) = pose {
+                let rows = &frames[frame % frames.len()];
+                paint_moving_bitmap(row, y, position, i32::from(*scale), *shade, rows, None, 0..WIDTH as i32);
+            }
+        }
+        Primitive::Frames(left, top, scale, shade, frames, _) => {
+            if let Some(py) = y.checked_sub(usize::from(*top))
+                && let Some(bits) = frames[frame % frames.len()].get(py / usize::from(*scale))
+            {
+                let start = usize::from(*left);
+                let scale = usize::from(*scale);
+                for x in start..(start + 16 * scale).min(WIDTH) {
+                    if (bits >> ((x - start) / scale)) & 1 != 0 {
+                        set_pixel(row, x, *shade);
+                    }
+                }
             }
         }
         Primitive::Bitmap(left, top, scale, shade, rows) => {

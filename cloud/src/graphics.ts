@@ -182,15 +182,17 @@ export function fitGraphics(board: Board, basePages: Page[]): void {
       const keep = (_: unknown, index: number, path: unknown[]) => index % 2 === 0 || index === path.length - 1;
       if (command.length === 4) return [command[0], command[1], command[2], command[3].filter(keep)];
       if (command.length === 5 && Array.isArray(command[2]) && Array.isArray(command[3]) && typeof command[4] === "string") {
-        if (command[3].length === 5) {
-          const [left, top, width, height, samples] = command[3];
-          const path = command[4].match(/.{4}/g);
+        // Occluded or viewport motion sprites (Space tracks) end with a hex path string.
+        const motion = command as [number, number, number[], [number, number, number] | [number, number, number, number, number], string];
+        if (motion[3].length === 5) {
+          const [left, top, width, height, samples] = motion[3];
+          const path = motion[4].match(/.{4}/g);
           // Both Space paths have an even number of intervals, including the local prefix.
-          return path ? [command[0], command[1], command[2],
+          return path ? [motion[0], motion[1], motion[2],
             [left, top, width, height, Math.floor(samples / 2) + 1], path.filter(keep).join("")] : command;
         }
-        const path = command[4].match(/.{6}/g);
-        if (path) return [command[0], command[1], command[2], command[3], path.filter(keep).join("")];
+        const path = motion[4].match(/.{6}/g);
+        if (path) return [motion[0], motion[1], motion[2], motion[3], path.filter(keep).join("")];
       }
       return command;
     })) },

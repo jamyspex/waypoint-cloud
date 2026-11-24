@@ -97,6 +97,20 @@ export default $config({
       ],
     }, { auth: { lambda: authorizer.id } });
 
+    // Flightradar24 lookups (flights, airports, airlines) and the daily credit budget.
+    const fr24Cache = new sst.aws.Dynamo("Fr24Cache", {
+      fields: { key: "string" },
+      primaryIndex: { hashKey: "key" },
+      ttl: "expireAt",
+    });
+    const fr24Token = `/waypoint-terminal/${$app.stage}/fr24-api-token`;
+    // "Did you know" facts researched with Gemini + Google Search grounding, cached per subject.
+    const contextTable = new sst.aws.Dynamo("ContextFacts", {
+      fields: { subject: "string" },
+      primaryIndex: { hashKey: "subject" },
+      ttl: "expireAt",
+    });
+    const geminiKey = `/waypoint-terminal/${$app.stage}/gemini-api-key`;
     const collector = new sst.aws.Function("CollectFeeds", {
       handler: "src/collect.handler",
       runtime: "nodejs22.x",
@@ -107,6 +121,9 @@ export default $config({
         RAIL_API_KEY: railKey,
         OCTOPUS_API_KEY: octopusKey,
         CALENDAR_PREFIX: calendarPrefix,
+        FR24_API_TOKEN: fr24Token,
+        FR24_CACHE_TABLE: fr24Cache.name,
+        CONTEXT_TABLE: contextTable.name,
       },
       permissions: [
         { actions: ["s3:GetObject", "s3:PutObject"], resources: [
@@ -122,7 +139,9 @@ export default $config({
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${feedSettings}`,
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${railKey}`,
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${octopusKey}`,
+          $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${fr24Token}`,
         ] },
+        { actions: ["dynamodb:BatchGetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [fr24Cache.arn, contextTable.arn] },
         { actions: ["ssm:GetParameter"], resources: [
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/client`,
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/settings`,
@@ -149,6 +168,21 @@ export default $config({
       ],
     });
     new sst.aws.CronV2("RefreshOrbitsSchedule", { function: orbitRefresher, schedule: "rate(2 hours)" });
+
+    // Researches queued "did you know" subjects; one copy at a time, capped per day and per month.
+    const contextResearcher = new sst.aws.Function("ContextResearch", {
+      handler: "src/context-facts.handler",
+      runtime: "nodejs22.x",
+      timeout: "5 minutes",
+      memory: "256 MB",
+      concurrency: { reserved: 1 },
+      environment: { CONTEXT_TABLE: contextTable.name, GEMINI_API_KEY: geminiKey, GEMINI_MODEL: "gemini-4-hydrogen" },
+      permissions: [
+        { actions: ["dynamodb:Scan", "dynamodb:UpdateItem"], resources: [contextTable.arn] },
+        { actions: ["ssm:GetParameter"], resources: [$interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${geminiKey}`] },
+      ],
+    });
+    new sst.aws.CronV2("ContextResearchSchedule", { function: contextResearcher, schedule: "rate(2 minutes)" });
 
     // Freight: AWS reads RDM's NWR Train Movements Kafka topic and hands batches to this Lambda,
     // which keeps the latest position of every freight train in feeds/freight-trains.json.

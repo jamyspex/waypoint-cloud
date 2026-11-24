@@ -13,7 +13,7 @@ const profile = process.env.AWS_PROFILE || "linespeed-root-admin";
 const exec = promisify(execFile);
 // Saved sample screens for cards that are rarely live. Each is served at /demo/<name>.
 const demos = new Map();
-for (const name of ["air", "aurora", "mix", "freight"]) {
+for (const name of ["air", "aurora", "mix", "freight", "context"]) {
   const board = JSON.parse(await readFile(new URL(`./${name}-demo.json`, import.meta.url), "utf8"));
   const screens = board.pages.map(({ id, mode, title }) => ({ id, mode, title }));
   demos.set(name, { board, index: { version: 3, screens } });

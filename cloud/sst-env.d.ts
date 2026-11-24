@@ -10,9 +10,21 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Function"
     }
+    "ContextFacts": {
+      "name": string
+      "type": "sst.aws.Dynamo"
+    }
+    "ContextResearch": {
+      "name": string
+      "type": "sst.aws.Function"
+    }
     "DisplayApi": {
       "type": "sst.aws.ApiGatewayV2"
       "url": string
+    }
+    "Fr24Cache": {
+      "name": string
+      "type": "sst.aws.Dynamo"
     }
     "FreightMovements": {
       "name": string

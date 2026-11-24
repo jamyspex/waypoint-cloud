@@ -7,7 +7,9 @@ export type Graphic =
   | [scale: number, shade: number, bitmapRows: number[], path: [number, number][]]
   | [left: number, top: number, width: number, height: number, scale: number, shade: number, pixels: string]
   | [scale: number, shade: number, bitmapRows: number[], occluder: [number, number, number], path: string]
-  | [scale: number, shade: number, bitmapRows: number[], viewport: [number, number, number, number, number], path: string];
+  | [scale: number, shade: number, bitmapRows: number[], viewport: [number, number, number, number, number], path: string]
+  | [left: number, top: number, scale: number, shade: number, frames: number[][], frameMs: number]
+  | [scale: number, shade: number, frames: number[][], path: [number, number][], frameMs: number];
 export type GraphicAnimation = { phase_ms: number; phases: Graphic[][] };
 export type Marquee = { left: number; top: number; width: number; shade: number; speed: number; text: string };
 export type Page = {
@@ -25,6 +27,8 @@ export type Page = {
   clock?: { right: number; shade: number };
   starts_at?: number;
   dwell_seconds?: number;
+  // Where the device draws the time-left bar (normally the line under the title).
+  progress?: { top: number; left: number; width: number; shade: number };
 };
 export type Board = { version: 2; rotation: number; pages: Page[] };
 export type MeetingFocus = { title: string; label: string; starts: number; ends: number; showInProgress: boolean };
@@ -33,7 +37,9 @@ export type LiveOrbitCatalog = {
   lat: number; lon: number; stale: boolean; overhead?: number;
   orbits: { name: string; line1: string; line2: string }[];
 };
-export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page[] };
+export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page[];
+  // "Did you know" screens keyed by the id of the card they follow.
+  context?: Record<string, Page>; costs?: Page };
 export const maxBoardBytes = 8192;
 export const maxMarinePhases = 40;
 export const detailedBoardKey = "feeds/waypoint-detailed.json";
@@ -60,9 +66,28 @@ export function screensOf(board: DetailedBoard, notification?: Page, satellites?
     const last = list.map((page) => page.mode).lastIndexOf(mode);
     return last < 0 ? [...list, ...extra] : [...list.slice(0, last + 1), ...extra, ...list.slice(last + 1)];
   };
-  const withGrid = after(after(screens, "rail", board.freight ?? []), "energy", board.grid ?? []);
-  return [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...(board.aurora ? [board.aurora] : []),
+  const withGrid = after(after(screens, "rail", board.freight ?? []), "energy", [...board.grid ?? [], ...(board.costs ? [board.costs] : [])]);
+  const all = [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...(board.aurora ? [board.aurora] : []),
     ...withGrid, ...(board.marine ?? []), ...(board.sky ?? [])];
+  // Each "did you know" screen follows the card it explains, and only while that card is in the rotation.
+  return board.context ? all.flatMap((page) => board.context?.[page.id] ? [page, board.context[page.id]] : [page]) : all;
+}
+
+/**
+ * Point the device's time-left bar at the screen's title line: the first thin line spanning most of the
+ * width near the top of a drawn screen, or the divider of the text-row layout; otherwise the bottom edge.
+ */
+export function withProgress(page: Page): Page {
+  if (page.progress) return page;
+  const commands = [...page.graphics ?? [], ...page.animation?.phases[0] ?? []];
+  const line = commands.find((command) => {
+    const [x, y, width, height, shade] = command as unknown[];
+    return command.length === 5 && typeof shade === "number" && typeof x === "number" && height === 1
+      && typeof y === "number" && y <= 20 && typeof width === "number" && width >= 150;
+  }) as [number, number, number, number, number] | undefined;
+  if (line) return { ...page, progress: { top: line[1], left: line[0], width: Math.min(line[2], 256 - line[0]), shade: 11 } };
+  if (!page.graphics && !page.animation && page.mode !== "air") return { ...page, progress: { top: 18, left: 0, width: 256, shade: 11 } };
+  return { ...page, progress: { top: 63, left: 0, width: 256, shade: 9 } };
 }
 
 export function screenIndex(screens: Page[]) {
@@ -71,7 +96,7 @@ export function screenIndex(screens: Page[]) {
 
 export function isDetailedBoard(value: unknown): value is DetailedBoard {
   if (!isBoard(value)) return false;
-  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight } = value as DetailedBoard;
+  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight, context, costs } = value as DetailedBoard;
   const validPage = (page: Page) => isBoard({ version: 2, rotation: value.rotation, pages: [page] });
   return (aircraft === undefined || (Array.isArray(aircraft) && aircraft.every((page) => page?.mode === "air" && validPage(page))))
     && (spacePreviews === undefined || (Array.isArray(spacePreviews) && inRange(spacePreviews.length, 1, 5)
@@ -86,6 +111,9 @@ export function isDetailedBoard(value: unknown): value is DetailedBoard {
     && (grid === undefined || (Array.isArray(grid) && inRange(grid.length, 1, 2)
       && grid.every((page) => page?.mode === "energy" && page.id.startsWith("grid-") && validPage(page))))
     && (aurora === undefined || (aurora?.id === "aurora" && validPage(aurora)))
+    && (costs === undefined || (costs?.id === "gemini-costs" && validPage(costs)))
+    && (context === undefined || (context && typeof context === "object" && Object.keys(context).length <= 16
+      && Object.values(context).every((page) => page?.id.startsWith("ctx-") && validPage(page))))
     && (freight === undefined || (Array.isArray(freight) && inRange(freight.length, 1, 6)
       && freight.every((page) => page?.id.startsWith("freight-") && validPage(page))))
     && (sky === undefined || (Array.isArray(sky) && inRange(sky.length, 1, 5)
@@ -121,6 +149,12 @@ function isGraphic(value: unknown): value is Graphic {
   if (!Array.isArray(value)) return false;
   const bitmap = (rows: unknown): boolean => Array.isArray(rows) && inRange(rows.length, 1, 32)
     && rows.every((bits) => inRange(bits, 0, 65535));
+  if (value.length === 6) {
+    // Looping sprite frames: [left, top, scale, shade, frames of bitmap rows, ms per frame] (needs Frames firmware).
+    const [x, y, scale, shade, frames, frameMs] = value as unknown[];
+    return inRange(x, 0, 255) && inRange(y, 0, 63) && inRange(scale, 1, 4) && inRange(shade, 0, 15)
+      && Array.isArray(frames) && inRange(frames.length, 1, 16) && frames.every(bitmap) && inRange(frameMs, 50, 5000);
+  }
   if (value.length === 7) {
     const [x, y, width, height, scale, shade, hex] = value;
     return inRange(x, 0, 255) && inRange(y, 0, 63) && inRange(width, 1, 255) && inRange(height, 1, 64)
@@ -134,6 +168,14 @@ function isGraphic(value: unknown): value is Graphic {
       && Array.isArray(path) && inRange(path.length, 2, 24)
       && path.every((point) => Array.isArray(point) && point.length === 2
         && inRange(point[0], 0, 255) && inRange(point[1], 0, 63));
+  }
+  if (value.length === 5 && Array.isArray(value[2]) && Array.isArray((value[2] as unknown[])[0])) {
+    // Looping sprite on a path: [scale, shade, frames, path, ms per frame]; path coordinates are offset by 32.
+    const [scale, shade, frames, path, frameMs] = value as unknown[];
+    return inRange(scale, 1, 4) && inRange(shade, 0, 15) && Array.isArray(frames) && inRange(frames.length, 1, 16)
+      && frames.every(bitmap) && Array.isArray(path) && inRange(path.length, 2, 24)
+      && path.every((point) => Array.isArray(point) && point.length === 2 && inRange(point[0], 0, 255) && inRange(point[1], 0, 127))
+      && inRange(frameMs, 50, 5000);
   }
   if (value.length !== 5) return false;
   const [x, y, scaleOrWidth, shadeOrHeight, content] = value;
@@ -183,6 +225,8 @@ export function isBoard(value: unknown): value is Board {
         && inRange(p.marquee.shade, 0, 15) && inRange(p.marquee.speed, 10, 100)
         && typeof p.marquee.text === "string" && inRange(p.marquee.text.length, 1, 768)
         && /^[\x20-\x7e]+$/.test(p.marquee.text)))
+      && (p.progress === undefined || (p.progress && inRange(p.progress.top, 0, 63) && inRange(p.progress.left, 0, 255)
+        && inRange(p.progress.width, 1, 256 - p.progress.left) && inRange(p.progress.shade, 0, 15)))
       && (p.clock === undefined || (p.clock && inRange(p.clock.right, 32, 255)
         && inRange(p.clock.shade, 0, 15)))
       && (p.animation === undefined || (p.animation && inRange(p.animation.phase_ms, 500, 120000)

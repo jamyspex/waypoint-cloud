@@ -7,14 +7,14 @@ export type Aircraft = {
   lat?: number; lon?: number; dst?: number; alt_baro?: number | "ground"; alt_geom?: number; gs?: number; seen_pos?: number;
 };
 
-type Airport = { iata_code?: string | null; icao_code?: string; municipality?: string | null; name?: string; latitude?: number; longitude?: number };
-type Route = {
+export type Airport = { iata_code?: string | null; icao_code?: string; municipality?: string | null; name?: string; latitude?: number; longitude?: number };
+export type Route = {
   callsign_iata?: string | null;
   airline?: { name?: string } | null;
   origin?: Airport;
   destination?: Airport;
 };
-type Lookup = { route?: Route; airline?: string; owner?: string };
+export type Lookup = { route?: Route; airline?: string; owner?: string };
 const lookupCache = new Map<string, { expires: number; data: Lookup }>();
 
 function clean(value: unknown): string {
@@ -118,7 +118,7 @@ function airportCode(airport?: Airport): string {
   return /^[A-Z0-9]{3}$/.test(iata) ? iata : /^[A-Z0-9]{4}$/.test(icao) ? icao : "---";
 }
 
-export async function airPresentation(aircraft: Aircraft, distance: number, deadline?: AbortSignal): Promise<{ title: string; rows: Row[]; graphics: Graphic[] }> {
+export async function airPresentation(aircraft: Aircraft, distance: number, deadline?: AbortSignal, known?: Lookup): Promise<{ title: string; rows: Row[]; graphics: Graphic[] }> {
   const callsign = clean(aircraft.flight);
   const registration = clean(aircraft.r);
   const hex = clean(aircraft.hex);
@@ -127,8 +127,9 @@ export async function airPresentation(aircraft: Aircraft, distance: number, dead
   const description = clean(aircraft.desc);
   const operator = clean(aircraft.ownOp);
   const military = isMilitary(aircraft);
+  // Flightradar24 (when available) knows this flight's actual route; adsbdb is the fallback.
   const [{ route: listed, airline }, owner] = await Promise.all([
-    lookupFlight(callsign, deadline),
+    known?.route ? Promise.resolve({ ...known, airline: known.airline || "" }) : lookupFlight(callsign, deadline),
     military && !operator ? lookupOwner(registration, hex, deadline) : Promise.resolve(""),
   ]);
   const route = plausibleRoute(listed, aircraft);

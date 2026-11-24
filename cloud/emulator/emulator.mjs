@@ -12,6 +12,7 @@ const demos = {
   aurora: "Demo aurora alert · sample activity",
   mix: "Demo North Scotland mix · sample generation",
   freight: "Demo Highland freight · sample movements",
+  context: "Demo did-you-know screens · facts researched by Gemini",
 };
 const demo = demos[location.pathname.match(/^\/demo\/([a-z]+)$/)?.[1]];
 for (const link of document.querySelectorAll("nav a")) {
@@ -39,7 +40,8 @@ let last = performance.now();
 let lastFrame;
 let retryAt = 0;
 const seen = new Map();
-const motion = (command) => Array.isArray(command[3]);
+// Moving sprites (paths in slot 3) and looping Frames sprites (6 elements) both need continuous redraws.
+const motion = (command) => Array.isArray(command[3]) || command.length === 6;
 const london = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/London", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
@@ -183,7 +185,7 @@ function frame(now) {
     }
     const within = page.starts_at === undefined ? elapsed % duration : Math.min(elapsed, duration - 1);
     const phase = page.animation ? Math.floor(within / page.animation.phase_ms) : 0;
-    const moving = page.marquee || page.graphics?.some(motion) || page.animation?.phases[phase]?.some(motion)
+    const moving = page.marquee || page.progress || page.graphics?.some(motion) || page.animation?.phases[phase]?.some(motion)
       || (!page.graphics && !page.animation && page.mode !== "air" && page.rows.some((row) => row[1].length > 16));
     const tick = moving ? Math.floor(within / 17) : 0;
     const cachedClock = page.clock || (!page.graphics && !page.animation && page.mode !== "air")
