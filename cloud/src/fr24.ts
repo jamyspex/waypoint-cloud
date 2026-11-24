@@ -26,6 +26,11 @@ async function get<T>(token: string, path: string, deadline: AbortSignal): Promi
   const response = await fetch(`${api}${path}`, {
     headers: { Accept: "application/json", "Accept-Version": "v1", Authorization: `Bearer ${token}` }, signal: deadline,
   });
+  // FR24 reports the account's remaining credits on every response; keep the latest for the costs screen.
+  const remaining = Number(response.headers.get("x-fr24-credits-remaining"));
+  if (Number.isFinite(remaining) && response.headers.has("x-fr24-credits-remaining")) {
+    await remember("credits#remaining", { remaining, at: Date.now() }, 40 * 86_400).catch(() => undefined);
+  }
   if (!response.ok) throw new Error(`FR24 HTTP ${response.status}`);
   return await response.json() as T;
 }
@@ -54,7 +59,7 @@ async function reserve(credits: number): Promise<boolean> {
       TableName: table, Key: { key: `budget#${day}` },
       UpdateExpression: "ADD spent :credits SET expireAt = :expiry",
       ConditionExpression: "attribute_not_exists(spent) OR spent <= :limit",
-      ExpressionAttributeValues: { ":credits": credits, ":limit": dailyCredits - credits, ":expiry": Math.floor(Date.now() / 1000) + 3 * 86_400 },
+      ExpressionAttributeValues: { ":credits": credits, ":limit": dailyCredits - credits, ":expiry": Math.floor(Date.now() / 1000) + 40 * 86_400 },
     }));
     return true;
   } catch {

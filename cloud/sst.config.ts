@@ -142,6 +142,7 @@ export default $config({
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${fr24Token}`,
         ] },
         { actions: ["dynamodb:BatchGetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [fr24Cache.arn, contextTable.arn] },
+        { actions: ["ce:GetCostAndUsage"], resources: ["*"] },
         { actions: ["ssm:GetParameter"], resources: [
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/client`,
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/settings`,

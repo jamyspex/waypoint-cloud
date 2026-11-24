@@ -17,6 +17,7 @@ import { freightPages, freightWanted } from "./freight-screen.js";
 import { contextFacts, satelliteSubject, type Wanted } from "./context.js";
 import { contextPage } from "./context-screen.js";
 import { costsPage } from "./costs-screen.js";
+import { runningCostsPage } from "./running-costs.js";
 import { liveTargets } from "./live-space.js";
 import type { FreightFile } from "./freight.js";
 import { reserveAircraftFallback } from "./air-fallback.js";
@@ -262,10 +263,10 @@ export async function handler() {
     board.context = Object.fromEntries([...context].map(([parentId, { subject, facts }]) =>
       [parentId, contextPage({ id: parentId, mode: modes[subject.kind] }, subject, facts, now.getTime())]));
   }
-  board.costs = await costsPage(now).catch((error: unknown) => {
+  [board.costs, board.runningCosts] = await Promise.all([costsPage(now), runningCostsPage(now)].map((page) => page.catch((error: unknown) => {
     console.warn("costs: %s", error instanceof Error ? error.message : "read failed");
     return undefined;
-  });
+  })));
   const screens = screensOf(board);
   if (!isDetailedBoard(board) || Buffer.byteLength(JSON.stringify(board)) > maxDetailedBoardBytes
     || Buffer.byteLength(JSON.stringify(screenIndex(screens))) > maxBoardBytes

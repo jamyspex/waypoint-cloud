@@ -39,7 +39,7 @@ export type LiveOrbitCatalog = {
 };
 export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page[];
   // "Did you know" screens keyed by the id of the card they follow.
-  context?: Record<string, Page>; costs?: Page };
+  context?: Record<string, Page>; costs?: Page; runningCosts?: Page };
 export const maxBoardBytes = 8192;
 export const maxMarinePhases = 40;
 export const detailedBoardKey = "feeds/waypoint-detailed.json";
@@ -66,7 +66,7 @@ export function screensOf(board: DetailedBoard, notification?: Page, satellites?
     const last = list.map((page) => page.mode).lastIndexOf(mode);
     return last < 0 ? [...list, ...extra] : [...list.slice(0, last + 1), ...extra, ...list.slice(last + 1)];
   };
-  const withGrid = after(after(screens, "rail", board.freight ?? []), "energy", [...board.grid ?? [], ...(board.costs ? [board.costs] : [])]);
+  const withGrid = after(after(screens, "rail", board.freight ?? []), "energy", [...board.grid ?? [], ...(board.runningCosts ? [board.runningCosts] : []), ...(board.costs ? [board.costs] : [])]);
   const all = [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...(board.aurora ? [board.aurora] : []),
     ...withGrid, ...(board.marine ?? []), ...(board.sky ?? [])];
   // Each "did you know" screen follows the card it explains, and only while that card is in the rotation.
@@ -96,7 +96,7 @@ export function screenIndex(screens: Page[]) {
 
 export function isDetailedBoard(value: unknown): value is DetailedBoard {
   if (!isBoard(value)) return false;
-  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight, context, costs } = value as DetailedBoard;
+  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight, context, costs, runningCosts } = value as DetailedBoard;
   const validPage = (page: Page) => isBoard({ version: 2, rotation: value.rotation, pages: [page] });
   return (aircraft === undefined || (Array.isArray(aircraft) && aircraft.every((page) => page?.mode === "air" && validPage(page))))
     && (spacePreviews === undefined || (Array.isArray(spacePreviews) && inRange(spacePreviews.length, 1, 5)
@@ -112,6 +112,7 @@ export function isDetailedBoard(value: unknown): value is DetailedBoard {
       && grid.every((page) => page?.mode === "energy" && page.id.startsWith("grid-") && validPage(page))))
     && (aurora === undefined || (aurora?.id === "aurora" && validPage(aurora)))
     && (costs === undefined || (costs?.id === "gemini-costs" && validPage(costs)))
+    && (runningCosts === undefined || (runningCosts?.id === "running-costs" && validPage(runningCosts)))
     && (context === undefined || (context && typeof context === "object" && Object.keys(context).length <= 16
       && Object.values(context).every((page) => page?.id.startsWith("ctx-") && validPage(page))))
     && (freight === undefined || (Array.isArray(freight) && inRange(freight.length, 1, 6)
