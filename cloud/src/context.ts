@@ -11,7 +11,7 @@ export type Wanted = { parentId: string; subject: Subject };
 
 export const ttlDays: Record<Kind, number> = { aircraft: 30, vessel: 30, freight: 30, satellite: 90 };
 const windowMs = 10 * 60_000;
-const cooldownMs = 3 * 3_600_000;
+const cooldownMs = 3_600_000;
 const pendingDays = 2;
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -106,7 +106,7 @@ type Item = { subject: string; status?: string; headline?: string; facts?: strin
 
 /**
  * Collector side: look up facts for the wanted subjects, queue research for new ones, and return the facts
- * to show now. Each subject shows for one rotation-length window, then rests for three hours.
+ * to show now. Each subject shows for one rotation-length window, then rests for an hour.
  */
 export async function contextFacts(wanted: Wanted[], now: number): Promise<Map<string, { subject: Subject; facts: Facts }>> {
   const shown = new Map<string, { subject: Subject; facts: Facts }>();
