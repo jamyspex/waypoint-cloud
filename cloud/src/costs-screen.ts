@@ -85,7 +85,7 @@ export async function costsPage(nowDate: Date): Promise<Page | undefined> {
     `SEARCH $${searchPricePerThousand} PER 1K AFTER FREE`,
   ].join("  -  ");
   return {
-    id: "gemini-costs", mode: "energy", title: "GEMINI COSTS", updated: londonClock.format(now), state: "live",
+    id: "gemini-costs", mode: "costs", title: "GEMINI COSTS", updated: londonClock.format(now), state: "live",
     rows: [row("", `GEMINI ${dollars(monthCost)} THIS MONTH`, "")],
     graphics, clock: { right: 254, shade: 11 }, dwell_seconds: 20,
     marquee: { left: 121, top: 53, width: 132, shade: 10, speed: 30, text: displayText(breakdown, 760) },

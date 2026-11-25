@@ -1,4 +1,4 @@
-export type Mode = "bus" | "rail" | "air" | "space" | "energy" | "calendar" | "marine" | "sky";
+export type Mode = "bus" | "rail" | "air" | "space" | "energy" | "calendar" | "marine" | "sky" | "costs";
 export type Row = [lead: string, description: string, status: string];
 export type Graphic =
   | [x: number, y: number, width: number, height: number, shade: number]
@@ -39,7 +39,7 @@ export type LiveOrbitCatalog = {
 };
 export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page[];
   // "Did you know" screens keyed by the id of the card they follow.
-  context?: Record<string, Page>; costs?: Page; runningCosts?: Page };
+  context?: Record<string, Page>; costs?: Page; runningCosts?: Page; awsCosts?: Page };
 export const maxBoardBytes = 8192;
 export const maxMarinePhases = 40;
 export const detailedBoardKey = "feeds/waypoint-detailed.json";
@@ -60,13 +60,15 @@ export function screensOf(board: DetailedBoard, notification?: Page, satellites?
       animation: { phase_ms, phases: [phase] },
     }));
   });
-  // Grid carbon follows the electricity screens; an aurora alert goes to the front.
+  // Grid carbon follows the electricity screens, then the running-cost screens; an aurora alert goes to the front.
   // Highland freight follows the rail boards.
   const after = (list: Page[], mode: Page["mode"], extra: Page[]) => {
     const last = list.map((page) => page.mode).lastIndexOf(mode);
     return last < 0 ? [...list, ...extra] : [...list.slice(0, last + 1), ...extra, ...list.slice(last + 1)];
   };
-  const withGrid = after(after(screens, "rail", board.freight ?? []), "energy", [...board.grid ?? [], ...(board.runningCosts ? [board.runningCosts] : []), ...(board.costs ? [board.costs] : [])]);
+  // What Waypoint costs to run is its own section, straight after energy.
+  const costs = [board.runningCosts, board.awsCosts, board.costs].filter((page): page is Page => page !== undefined);
+  const withGrid = after(after(after(screens, "rail", board.freight ?? []), "energy", board.grid ?? []), "energy", costs);
   const all = [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...(board.aurora ? [board.aurora] : []),
     ...withGrid, ...(board.marine ?? []), ...(board.sky ?? [])];
   // Each "did you know" screen follows the card it explains, and only while that card is in the rotation.
@@ -90,13 +92,23 @@ export function withProgress(page: Page): Page {
   return { ...page, progress: { top: 63, left: 0, width: 256, shade: 9 } };
 }
 
+// Section labels the device shows in screen headers and on the loading card. The device re-reads them with
+// every screen index, so a new section only needs a cloud change. Labels are at most 10 characters.
+export const sectionLabels: Record<Mode, string> = {
+  bus: "BUS", rail: "RAIL", air: "AIR", space: "SPACE", energy: "ENERGY", calendar: "CALENDAR", marine: "MARINE", sky: "SKY", costs: "COSTS",
+};
+
 export function screenIndex(screens: Page[]) {
-  return { version: 3, screens: screens.map(({ id, mode, title }) => ({ id, mode, title })) };
+  const modes = [...new Set(screens.map(({ mode }) => mode))];
+  return {
+    version: 3, screens: screens.map(({ id, mode, title }) => ({ id, mode, title })),
+    sections: modes.map((mode) => ({ mode, label: sectionLabels[mode] })),
+  };
 }
 
 export function isDetailedBoard(value: unknown): value is DetailedBoard {
   if (!isBoard(value)) return false;
-  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight, context, costs, runningCosts } = value as DetailedBoard;
+  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight, context, costs, runningCosts, awsCosts } = value as DetailedBoard;
   const validPage = (page: Page) => isBoard({ version: 2, rotation: value.rotation, pages: [page] });
   return (aircraft === undefined || (Array.isArray(aircraft) && aircraft.every((page) => page?.mode === "air" && validPage(page))))
     && (spacePreviews === undefined || (Array.isArray(spacePreviews) && inRange(spacePreviews.length, 1, 5)
@@ -113,6 +125,7 @@ export function isDetailedBoard(value: unknown): value is DetailedBoard {
     && (aurora === undefined || (aurora?.id === "aurora" && validPage(aurora)))
     && (costs === undefined || (costs?.id === "gemini-costs" && validPage(costs)))
     && (runningCosts === undefined || (runningCosts?.id === "running-costs" && validPage(runningCosts)))
+    && (awsCosts === undefined || (awsCosts?.id === "aws-costs" && validPage(awsCosts)))
     && (context === undefined || (context && typeof context === "object" && Object.keys(context).length <= 16
       && Object.values(context).every((page) => page?.id.startsWith("ctx-") && validPage(page))))
     && (freight === undefined || (Array.isArray(freight) && inRange(freight.length, 1, 6)
@@ -210,7 +223,7 @@ export function isBoard(value: unknown): value is Board {
     && board.rotation >= 5 && board.rotation <= 60 && Array.isArray(board.pages)
     && board.pages.length >= 1 && board.pages.length <= 10
     && board.pages.every((p) => p && typeof p.id === "string" && p.id.length <= 24
-      && ["bus", "rail", "air", "space", "energy", "calendar", "marine", "sky"].includes(p.mode)
+      && ["bus", "rail", "air", "space", "energy", "calendar", "marine", "sky", "costs"].includes(p.mode)
       && ["live", "stale", "offline"].includes(p.state)
       && typeof p.title === "string" && p.title.length >= 1 && p.title.length <= 26
       && typeof p.updated === "string" && /^\d{2}:\d{2}$/.test(p.updated)

@@ -1,6 +1,10 @@
 use alloc::{string::String, vec::Vec};
+use core::cell::RefCell;
 
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_sync::{
+    blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
+    signal::Signal,
+};
 use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -38,6 +42,35 @@ pub enum Content {
 pub struct ScreenIndex {
     version: u8,
     pub screens: Vec<ScreenRef>,
+    /// Section labels from the cloud, such as `costs` -> `COSTS`, so new sections need no firmware change.
+    #[serde(default)]
+    pub sections: Vec<Section>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct Section {
+    pub mode: String,
+    pub label: String,
+}
+
+/// The latest section labels, refreshed with every screen index.
+static SECTIONS: Mutex<CriticalSectionRawMutex, RefCell<Vec<Section>>> = Mutex::new(RefCell::new(Vec::new()));
+
+pub fn set_sections(sections: &[Section]) {
+    SECTIONS.lock(|current| current.replace(sections.to_vec()));
+}
+
+/// Label for a section: the cloud's label if it sent one, otherwise the mode in capitals.
+pub fn section_label(mode: &str) -> String {
+    SECTIONS
+        .lock(|sections| {
+            sections
+                .borrow()
+                .iter()
+                .find(|section| section.mode == mode)
+                .map(|section| section.label.clone())
+        })
+        .unwrap_or_else(|| mode.to_ascii_uppercase())
 }
 
 #[derive(Deserialize)]
@@ -62,6 +95,10 @@ impl ScreenIndex {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-')
                     && index.screens[..i].iter().all(|prior| prior.id != screen.id)
+            })
+            && index.sections.len() <= 32
+            && index.sections.iter().all(|section| {
+                ascii(&section.mode, 12) && !section.label.is_empty() && ascii(&section.label, 10)
             }))
         .then_some(index)
     }
@@ -176,7 +213,7 @@ impl Board {
         let incoming = &self.pages[index];
         let new_aircraft = incoming.has_aircraft() && !old.has_aircraft();
         // Keep the objects on an active preview stable until its slot ends.
-        let keep_preview = (old.mode == Mode::Space && old.animation.is_some())
+        let keep_preview = (old.mode == "space" && old.animation.is_some())
             || (old.has_aircraft() && incoming.has_aircraft());
         if keep_preview {
             core::mem::swap(&mut self.pages[index], &mut previous.pages[old_index]);
@@ -200,7 +237,7 @@ impl Board {
 #[derive(Debug, Deserialize)]
 pub struct Page {
     pub id: Option<String>,
-    pub mode: Mode,
+    pub mode: String,
     pub title: String,
     pub updated: String,
     pub state: State,
@@ -242,7 +279,7 @@ pub struct ClockLabel {
 
 impl Page {
     fn has_aircraft(&self) -> bool {
-        self.mode == Mode::Air
+        self.mode == "air"
             && self.state != State::Offline
             && self
                 .rows
@@ -395,34 +432,6 @@ impl Primitive {
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Bus,
-    Rail,
-    Air,
-    Space,
-    Energy,
-    Calendar,
-    Marine,
-    Sky,
-}
-
-impl Mode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Bus => "BUS",
-            Self::Rail => "RAIL",
-            Self::Air => "AIR",
-            Self::Space => "SPACE",
-            Self::Energy => "ENERGY",
-            Self::Calendar => "CALENDAR",
-            Self::Marine => "MARINE",
-            Self::Sky => "SKY",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
 pub enum State {
     Live,
     Stale,
@@ -466,6 +475,8 @@ impl Content {
                     && (1..=10).contains(&board.pages.len())
                     && board.pages.iter().all(|page| {
                         !page.title.is_empty()
+                            && !page.mode.is_empty()
+                            && ascii(&page.mode, 12)
                             && ascii(&page.title, 26)
                             && ascii(&page.updated, 5)
                             && page.id.as_ref().is_none_or(|id| ascii(id, 24))
@@ -486,9 +497,8 @@ impl Content {
                                 commands.len() <= 32 && commands.iter().all(Primitive::valid)
                             })
                             && page.animation.as_ref().is_none_or(|animation| {
-                                let max_phases = if page.mode == Mode::Marine { 40 } else { 5 };
                                 (500..=120_000).contains(&animation.phase_ms)
-                                    && (1..=max_phases).contains(&animation.phases.len())
+                                    && (1..=40).contains(&animation.phases.len())
                                     && animation.phases.iter().all(|commands| {
                                         commands.len() <= 16
                                             && commands.iter().all(Primitive::valid)

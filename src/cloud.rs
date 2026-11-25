@@ -101,6 +101,8 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
     let mut skip_section = false;
     let mut resume_at: Option<String> = None;
     let mut visible = Vec::<(String, u64)>::new();
+    // Screens the device rejected since the last good one, skipped so one bad screen can't stall the rotation.
+    let mut failed = Vec::<String>::new();
     loop {
         stack.wait_config_up().await;
         if !clock::synchronize(stack).await {
@@ -150,6 +152,7 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
                     }
                 }
                 visible.retain(|(id, _)| new.screens.iter().any(|screen| &screen.id == id));
+                crate::scene::set_sections(&new.sections);
                 index = Some(new);
                 index_tag = tag;
             }
@@ -197,6 +200,13 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
             })
             .or(resume_at.as_deref())
             .unwrap_or(&index.screens[0].id);
+        let mut id = id;
+        for _ in 0..index.screens.len() {
+            if !failed.iter().any(|bad| bad == id) {
+                break;
+            }
+            id = index.next_after(id).unwrap_or(id);
+        }
         let path = format!("{PATH}?view=screen&screen={id}&at={at}");
         let board = match with_timeout(
             Duration::from_secs(10),
@@ -220,6 +230,10 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
                     _ => "INVALID SCREEN",
                 };
                 println!("Screen request: {reason}");
+                let bad_screen = matches!(reason, "INVALID SCREEN" | "INVALID SCENE" | "API ERROR" | "API BODY SIZE");
+                if bad_screen && !failed.iter().any(|bad| bad == id) {
+                    failed.push(String::from(id));
+                }
                 UPDATES.signal(Update::Status(reason));
                 Timer::after(POLL_INTERVAL).await;
                 continue;
@@ -272,6 +286,7 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
             ends: start + Duration::from_millis(remaining),
         });
         println!("Screen updated: {id}");
+        failed.clear();
         let next_title = index.next_after_screen(id).map(loading_title).unwrap_or_default();
         let section_title = index
             .next_section_after_screen(id)
@@ -293,17 +308,11 @@ pub async fn poll(stack: Stack<'static>, token: DeviceToken) {
 
 /// Label for the loading card, such as `RAIL: PARTICK`. Falls back to the bare title when it would not fit.
 fn loading_title(screen: &ScreenRef) -> String {
-    let prefix = match screen.mode.as_str() {
-        "bus" => "BUS",
-        "rail" => "RAIL",
-        "air" => "AIR",
-        "space" => "SPACE",
-        "energy" => "ENERGY",
-        "calendar" => "CALENDAR",
-        "marine" => "MARINE",
-        _ => return screen.title.clone(),
-    };
-    if screen.title.starts_with(prefix) {
+    if screen.mode.is_empty() {
+        return screen.title.clone();
+    }
+    let prefix = crate::scene::section_label(&screen.mode);
+    if screen.title.starts_with(prefix.as_str()) {
         return screen.title.clone();
     }
     let label = format!("{prefix}: {}", screen.title);

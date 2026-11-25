@@ -80,8 +80,9 @@ impl<'d> Display<'d> {
     }
 
     pub fn show_page(&mut self, page: &Page, shift: usize, clock: &str, filled: usize) -> Result<(), Error> {
+        let label = crate::scene::section_label(&page.mode);
         self.draw(|x, y| {
-            let shade = page_pixel(page, shift, clock, x, y);
+            let shade = page_pixel(page, &label, shift, clock, x, y);
             match &page.progress {
                 Some(bar) if y == usize::from(bar.top) => progress_shade(bar, filled, x).unwrap_or(shade),
                 _ => shade,
@@ -381,7 +382,7 @@ fn paint_progress(row: &mut Scanline, y: usize, bar: &Progress, filled: usize) {
     }
 }
 
-fn page_pixel(page: &Page, shift: usize, clock: &str, x: usize, y: usize) -> u8 {
+fn page_pixel(page: &Page, label: &str, shift: usize, clock: &str, x: usize, y: usize) -> u8 {
     match y {
         0..=8 => {
             let state = page.state.label();
@@ -389,7 +390,7 @@ fn page_pixel(page: &Page, shift: usize, clock: &str, x: usize, y: usize) -> u8 
             let clock_width = text_width(clock);
             let clock_left = (WIDTH - clock_width) / 2;
             if (2..49).contains(&x) {
-                text_pixel(page.mode.label(), x - 2, y) * 15
+                text_pixel(label, x - 2, y) * 15
             } else if (clock_left..clock_left + clock_width).contains(&x) {
                 text_pixel(clock, x - clock_left, y) * 8
             } else if x >= state_left {

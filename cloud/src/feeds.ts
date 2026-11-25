@@ -103,7 +103,9 @@ export async function railRows(station: Settings["rails"][number], credential: s
   return railPresentation(trains, data.locationName, updated, data.platformAvailable !== false);
 }
 
-export const aircraftRadius = 10;
+export const aircraftRadius = 25;
+// Nearest civilian aircraft given cards, so a busy sky doesn't swamp the rotation.
+const maxCivilianAircraft = 8;
 export const milAircraftRadius = 50;
 
 async function aircraftSnapshot(path: string, reserveFallback: () => Promise<boolean>): Promise<Aircraft[]> {
@@ -157,7 +159,9 @@ export async function nearbyAircraft(settings: Settings["air"], reserveFallback:
       return typeof distance === "number" && distance >= 0 && (distance <= aircraftRadius || isMilitary(a) && distance <= milAircraftRadius) ? [{ a, distance }] : [];
     }).sort((a, b) => a.distance - b.distance);
   const unique = new Map<string, typeof aircraft[number]>();
+  let civilian = 0;
   for (const contact of aircraft) {
+    if (!isMilitary(contact.a) && ++civilian > maxCivilianAircraft) continue;
     const { hex, r, flight, lat, lon, t } = contact.a;
     const key = [hex, r, flight].find((value) => typeof value === "string" && value.trim())?.trim().toUpperCase()
       ?? JSON.stringify([lat, lon, t, contact.distance]);

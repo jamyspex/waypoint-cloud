@@ -31,7 +31,7 @@ mod scene;
 
 use credentials::Credentials;
 use display::Display;
-use scene::{Animation, Content, Mode, Primitive, UPDATES, Update};
+use scene::{Animation, Content, Primitive, UPDATES, Update, section_label};
 
 const TITLE: &str = "WAYPOINT";
 const LOADING_DELAY_MS: u64 = 150;
@@ -343,7 +343,7 @@ async fn display_task(mut display: Display<'static>) {
                             };
                             println!(
                                 "Showing {} / {} ({})",
-                                page.mode.label(),
+                                section_label(&page.mode),
                                 title,
                                 page.state.label()
                             );
@@ -354,7 +354,7 @@ async fn display_task(mut display: Display<'static>) {
                         last_frame = Some(frame);
                         last_progress = Some(filled);
                     }
-                } else if matches!(page.mode, Mode::Air) {
+                } else if page.mode == "air" {
                     let frame = (index, 0, None);
                     if last_frame != Some(frame) {
                         display.show_aircraft(page).expect("OLED aircraft detail");
@@ -372,7 +372,7 @@ async fn display_task(mut display: Display<'static>) {
                         if last_frame.is_none_or(|(previous, _, _)| previous != index) {
                             println!(
                                 "Showing {} / {} ({})",
-                                page.mode.label(),
+                                section_label(&page.mode),
                                 page.title,
                                 page.state.label()
                             );
