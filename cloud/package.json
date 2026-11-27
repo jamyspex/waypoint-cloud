@@ -7,7 +7,8 @@
     "check": "tsc --noEmit",
     "deploy": "sst deploy --stage prod",
     "emulate": "node emulator/server.mjs",
-    "calendar:connect": "node scripts/calendar-connect.mjs"
+    "calendar:connect": "node scripts/calendar-connect.mjs",
+    "overnight:replay": "node scripts/overnight-replay.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-cost-explorer": "^3.1176.0",
@@ -21,6 +22,7 @@
     "suncalc": "^1.9.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-lambda": "^3.1174.0",
     "@types/aws-lambda": "^8.10.160",
     "@types/node": "^22.0.0",
     "@types/suncalc": "^1.9.2",

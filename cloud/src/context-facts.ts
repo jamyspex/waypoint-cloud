@@ -28,11 +28,11 @@ type Usage = {
   grounding_tool_count?: { type?: string; count?: number }[];
 };
 type Interaction = { model?: string; steps?: Step[]; usage?: Usage };
-type Metered = { input: number; output: number; thinking: number; searches: number; model: string };
+export type Metered = { input: number; output: number; thinking: number; searches: number; model: string };
 
 class StopRun extends Error {}
 
-async function apiKey(): Promise<string> {
+export async function apiKey(): Promise<string> {
   if (key) return key;
   const { Parameter } = await ssm.send(new GetParameterCommand({ Name: process.env.GEMINI_API_KEY, WithDecryption: true }));
   if (!Parameter?.Value) throw new Error("Gemini key missing");
@@ -55,7 +55,7 @@ async function spend(counter: string, amount: number, limit: number, days: numbe
 }
 
 // Add one call's usage to today's and this month's totals, which the cost screen reads.
-async function meter({ input, output, thinking, searches, model: used }: Metered, day: string): Promise<void> {
+export async function meter({ input, output, thinking, searches, model: used }: Metered, day: string): Promise<void> {
   const micros = Math.round(tokenCost(used, input, output, day) * 1_000_000);
   await Promise.all([`usage#${day}`, `usage#${day.slice(0, 7)}`].map((counter) => dynamo.send(new UpdateCommand({
     TableName: table, Key: { subject: counter },

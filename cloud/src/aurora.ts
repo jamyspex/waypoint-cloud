@@ -20,7 +20,7 @@ async function xml(path: string): Promise<string> {
 
 const asStatus = (value: string | undefined): Status | undefined => statuses.find((status) => status === value);
 
-async function fetchAurora(now: number): Promise<{ status: Status; activity: Activity[] }> {
+export async function fetchAurora(now: number): Promise<{ status: Status; activity: Activity[] }> {
   // AuroraWatch UK updates every few minutes; polling every five keeps load on their service low.
   if (cache && now - cache.fetched < 5 * 60_000) return cache;
   try {

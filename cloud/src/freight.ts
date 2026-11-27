@@ -1,7 +1,8 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { BatchWriteCommand, DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { stanoxNames } from "./stanox-names.js";
+import { freightLocations, operators } from "./freight-locations.js";
 
 // Lambda reads TRUST train movements from the RDM Kafka topic (TRAIN_MVT_ALL_TOC) through a
 // self-managed Kafka event source and keeps the latest position of every freight train.
@@ -34,6 +35,43 @@ const headcodeOf = (trainId: string) => trainId.slice(2, 6);
 const isFreight = (trainId: string) => /^[04678][A-Z0-9][0-9]{2}$/.test(headcodeOf(trainId));
 const number = (value: string | undefined) => Number(value ?? NaN);
 
+// Each report from a train in (or heading into) the local area becomes a row in Sightings (see sightings.ts), so
+// movements can be traced after the train drops out of the state file; the bySubject index lists one headcode's runs.
+const sightingsTable = process.env.SIGHTINGS_TABLE;
+const sightingLifetime = 180 * 86_400;
+const londonDay = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London" });
+
+function sighting(train: FreightTrain): Record<string, unknown> | undefined {
+  const here = freightLocations[train.last.stanox];
+  const next = train.next ? freightLocations[train.next] : undefined;
+  if (!here && !next) return;
+  const { event, at, planned, variation, status, stanox } = train.last;
+  const row: Record<string, unknown> = {
+    day: londonDay.format(at), sk: `freight#${new Date(at).toISOString()}#${train.id}#${stanox}#${event}`,
+    subject: `freight#${train.headcode}`, kind: "freight", label: train.headcode, headcode: train.headcode, at, firstSeen: at, lastSeen: at,
+    // The "did you know" subject for this train (see freightWanted), so the digest can reuse its headline.
+    context: `freight#${train.headcode}#${train.origin ?? "unknown"}`,
+    trainId: train.id, operator: operators[train.toc] ?? train.toc, event, stanox,
+    place: here?.name || stanoxNames[stanox] || stanox, line: here?.line ?? next?.line, local: Boolean(here),
+    planned: Number.isFinite(planned) ? planned : undefined, variation: Number.isFinite(variation) ? variation : undefined, status,
+    origin: train.originName, next: next?.name, terminated: train.terminated || undefined,
+    destination: train.destination, expireAt: Math.floor(at / 1000) + sightingLifetime,
+  };
+  return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined && value !== ""));
+}
+
+async function saveSightings(rows: Record<string, unknown>[]): Promise<void> {
+  if (!sightingsTable || !rows.length) return;
+  rows = [...new Map(rows.map((row) => [`${row.day}|${row.sk}`, row])).values()];
+  for (let i = 0; i < rows.length; i += 25) {
+    let pending = rows.slice(i, i + 25).map((Item) => ({ PutRequest: { Item } }));
+    for (let attempt = 0; pending.length && attempt < 3; attempt++) {
+      const { UnprocessedItems } = await dynamo.send(new BatchWriteCommand({ RequestItems: { [sightingsTable]: pending } }));
+      pending = (UnprocessedItems?.[sightingsTable] ?? []) as typeof pending;
+    }
+  }
+}
+
 function messages(event: KafkaEvent): Message[] {
   return Object.values(event.records ?? {}).flat().flatMap(({ value }) => {
     if (!value) return [];
@@ -61,6 +99,7 @@ export async function handler(event: KafkaEvent) {
   if (!bucket) throw new Error("Bucket missing");
   const state = await load();
   let applied = 0;
+  const sightings: Record<string, unknown>[] = [];
   for (const { header, body } of messages(event)) {
     if (!body?.train_id || !isFreight(body.train_id)) continue;
     const id = body.train_id;
@@ -92,6 +131,8 @@ export async function handler(event: KafkaEvent) {
       destination: previous?.destination, destinationStanox: previous?.destinationStanox,
       routeChecked: previous?.routeChecked, learned: previous?.learned,
     };
+    const row = sighting(state.trains[id]);
+    if (row) sightings.push(row);
     applied++;
   }
   const now = Date.now();
@@ -102,7 +143,8 @@ export async function handler(event: KafkaEvent) {
   for (const [id, [, departed]] of Object.entries(state.pending)) if (!(now - departed < keepFor)) delete state.pending[id];
   state.updated = now;
   await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: "application/json", Body: JSON.stringify(state) }));
-  console.log("freight: %d reports applied, %d trains tracked", applied, Object.keys(state.trains).length);
+  await saveSightings(sightings).catch((error: unknown) => console.warn("freight: sightings not saved: %s", error instanceof Error ? error.message : "error"));
+  console.log("freight: %d reports applied, %d local, %d trains tracked", applied, sightings.length, Object.keys(state.trains).length);
 }
 
 // Freight usually runs the same path under the same headcode each day. Each time a train terminates,

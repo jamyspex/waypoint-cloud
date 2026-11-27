@@ -1,4 +1,4 @@
-export type Mode = "bus" | "rail" | "air" | "space" | "energy" | "calendar" | "marine" | "sky" | "costs";
+export type Mode = "bus" | "rail" | "air" | "space" | "energy" | "calendar" | "marine" | "sky" | "costs" | "overnight";
 export type Row = [lead: string, description: string, status: string];
 export type Graphic =
   | [x: number, y: number, width: number, height: number, shade: number]
@@ -39,7 +39,9 @@ export type LiveOrbitCatalog = {
 };
 export type DetailedBoard = Board & { aircraft?: Page[]; spacePreviews?: Page[]; liveSpace?: LiveOrbitCatalog; agenda?: Page; meetingFocus?: MeetingFocus[]; marine?: Page[]; sky?: Page[]; grid?: Page[]; aurora?: Page; freight?: Page[];
   // "Did you know" screens keyed by the id of the card they follow.
-  context?: Record<string, Page>; costs?: Page; runningCosts?: Page; awsCosts?: Page };
+  context?: Record<string, Page>; costs?: Page; runningCosts?: Page; awsCosts?: Page;
+  // Overnight highlights (a cover and up to five exhibits), on the board from 08:00 to 12:00.
+  overnight?: Page[] };
 export const maxBoardBytes = 8192;
 export const maxMarinePhases = 40;
 export const detailedBoardKey = "feeds/waypoint-detailed.json";
@@ -70,6 +72,7 @@ export function screensOf(board: DetailedBoard, notification?: Page, satellites?
   const costs = [board.runningCosts, board.awsCosts, board.costs].filter((page): page is Page => page !== undefined);
   const withGrid = after(after(after(screens, "rail", board.freight ?? []), "energy", board.grid ?? []), "energy", costs);
   const all = [...(board.agenda ? [board.agenda] : []), ...(notification ? [notification] : []), ...(board.aurora ? [board.aurora] : []),
+    ...board.overnight ?? [],
     ...withGrid, ...(board.marine ?? []), ...(board.sky ?? [])];
   // Each "did you know" screen follows the card it explains, and only while that card is in the rotation.
   return board.context ? all.flatMap((page) => board.context?.[page.id] ? [page, board.context[page.id]] : [page]) : all;
@@ -95,7 +98,7 @@ export function withProgress(page: Page): Page {
 // Section labels the device shows in screen headers and on the loading card. The device re-reads them with
 // every screen index, so a new section only needs a cloud change. Labels are at most 10 characters.
 export const sectionLabels: Record<Mode, string> = {
-  bus: "BUS", rail: "RAIL", air: "AIR", space: "SPACE", energy: "ENERGY", calendar: "CALENDAR", marine: "MARINE", sky: "SKY", costs: "COSTS",
+  bus: "BUS", rail: "RAIL", air: "AIR", space: "SPACE", energy: "ENERGY", calendar: "CALENDAR", marine: "MARINE", sky: "SKY", costs: "COSTS", overnight: "OVERNIGHT",
 };
 
 export function screenIndex(screens: Page[]) {
@@ -108,7 +111,7 @@ export function screenIndex(screens: Page[]) {
 
 export function isDetailedBoard(value: unknown): value is DetailedBoard {
   if (!isBoard(value)) return false;
-  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight, context, costs, runningCosts, awsCosts } = value as DetailedBoard;
+  const { aircraft, spacePreviews, liveSpace, agenda, meetingFocus, marine, sky, grid, aurora, freight, context, costs, runningCosts, awsCosts, overnight } = value as DetailedBoard;
   const validPage = (page: Page) => isBoard({ version: 2, rotation: value.rotation, pages: [page] });
   return (aircraft === undefined || (Array.isArray(aircraft) && aircraft.every((page) => page?.mode === "air" && validPage(page))))
     && (spacePreviews === undefined || (Array.isArray(spacePreviews) && inRange(spacePreviews.length, 1, 5)
@@ -126,6 +129,8 @@ export function isDetailedBoard(value: unknown): value is DetailedBoard {
     && (costs === undefined || (costs?.id === "gemini-costs" && validPage(costs)))
     && (runningCosts === undefined || (runningCosts?.id === "running-costs" && validPage(runningCosts)))
     && (awsCosts === undefined || (awsCosts?.id === "aws-costs" && validPage(awsCosts)))
+    && (overnight === undefined || (Array.isArray(overnight) && overnight.length <= 6
+      && overnight.every((page) => page?.mode === "overnight" && /^overnight(-[1-5])?$/.test(page.id) && validPage(page))))
     && (context === undefined || (context && typeof context === "object" && Object.keys(context).length <= 16
       && Object.values(context).every((page) => page?.id.startsWith("ctx-") && validPage(page))))
     && (freight === undefined || (Array.isArray(freight) && inRange(freight.length, 1, 6)
@@ -223,7 +228,7 @@ export function isBoard(value: unknown): value is Board {
     && board.rotation >= 5 && board.rotation <= 60 && Array.isArray(board.pages)
     && board.pages.length >= 1 && board.pages.length <= 10
     && board.pages.every((p) => p && typeof p.id === "string" && p.id.length <= 24
-      && ["bus", "rail", "air", "space", "energy", "calendar", "marine", "sky", "costs"].includes(p.mode)
+      && ["bus", "rail", "air", "space", "energy", "calendar", "marine", "sky", "costs", "overnight"].includes(p.mode)
       && ["live", "stale", "offline"].includes(p.state)
       && typeof p.title === "string" && p.title.length >= 1 && p.title.length <= 26
       && typeof p.updated === "string" && /^\d{2}:\d{2}$/.test(p.updated)

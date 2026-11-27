@@ -34,6 +34,10 @@ declare module "sst" {
       "name": string
       "type": "sst.aws.Dynamo"
     }
+    "OvernightDigest": {
+      "name": string
+      "type": "sst.aws.Function"
+    }
     "RailFilesLondon": {
       "name": string
       "type": "sst.aws.Bucket"
@@ -45,6 +49,10 @@ declare module "sst" {
     "Scenes": {
       "name": string
       "type": "sst.aws.Bucket"
+    }
+    "Sightings": {
+      "name": string
+      "type": "sst.aws.Dynamo"
     }
   }
 }

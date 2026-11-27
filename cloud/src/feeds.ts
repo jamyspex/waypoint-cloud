@@ -176,6 +176,7 @@ export async function nearbyAircraft(settings: Settings["air"], reserveFallback:
     cards.push(...await Promise.all(contacts.slice(i, i + 4).map(async ([id, { a, distance }]) => ({
       id, ...await airPresentation(a, distance, deadline, known.get((a.flight ?? "").trim().toUpperCase())),
       subject: aircraftSubject(a, known.get((a.flight ?? "").trim().toUpperCase())),
+      seen: { distance, altitude: typeof a.alt_baro === "number" ? a.alt_baro : a.alt_geom },
     }))));
   }
   return cards;

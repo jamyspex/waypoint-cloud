@@ -15,6 +15,8 @@ import { gridScreens } from "./carbon.js";
 import { auroraScreen } from "./aurora.js";
 import { freightPages, freightWanted } from "./freight-screen.js";
 import { contextFacts, satelliteSubject, type Wanted } from "./context.js";
+import { recordSightings, type Seen } from "./sightings.js";
+import { overnightScreens } from "./overnight-board.js";
 import { contextPage } from "./context-screen.js";
 import { costsPage } from "./costs-screen.js";
 import { runningCostsPage } from "./running-costs.js";
@@ -154,8 +156,15 @@ export async function handler() {
   const fr24Token = Parameters?.find((parameter) => parameter.Name === fr24Parameter)?.Value;
   // Subjects for "did you know" screens, gathered from the cards as they are built.
   const wanted: Wanted[] = [];
-  const aircraft = nearbyAircraft(settings.air, () => reserveAircraftFallback(s3, bucket), fr24Token).then((cards) => cards.map(({ subject, ...card }): Page => {
-    if (subject) wanted.push({ parentId: card.id, subject });
+  // What passed by, for the overnight highlights; `fresh` marks subjects to record straight away.
+  const seen: Seen[] = [];
+  const fresh = new Set<string>();
+  const aircraft = nearbyAircraft(settings.air, () => reserveAircraftFallback(s3, bucket), fr24Token).then((cards) => cards.map(({ subject, seen: contact, ...card }): Page => {
+    if (subject) {
+      wanted.push({ parentId: card.id, subject });
+      seen.push({ kind: "aircraft", subject, ...contact });
+      if (!previousAircraft.some(({ id }) => id === card.id)) fresh.add(subject.key);
+    }
     return { ...card, mode: "air", updated, state: "live", dwell_seconds: 30 };
   })).catch((error: unknown) => {
     console.warn("air: %s", error instanceof Error ? error.message : "fetch error");
@@ -239,6 +248,7 @@ export async function handler() {
   const board: DetailedBoard = { version: 2, rotation: 60, pages: basePages.map(withGraphics), ...await calendar,
     aircraft: [...ordered, ...remaining.values()].map(withGraphics), marine: (await marine).pages };
   wanted.push(...(await marine).wanted);
+  for (const { subject } of (await marine).wanted) seen.push({ kind: "vessel", subject, area: subject.anchor.area });
   const skyScreens = [...(await weather ? [(await weather)!] : []), ...(await sky ?? [])];
   if (skyScreens.length) board.sky = skyScreens;
   const gridPages = await grid;
@@ -251,8 +261,14 @@ export async function handler() {
     // Satellites up now; their context is shown only while they are still live when the device asks.
     for (const target of liveTargets(board.liveSpace, now.getTime())) {
       const line1 = board.liveSpace.orbits.find((orbit) => orbit.line1.slice(2, 7).trim() === target.record.satnum.trim())?.line1;
-      wanted.push({ parentId: target.page.id, subject: satelliteSubject(target.page.title, target.record.satnum,
-        target.record.inclo * 180 / Math.PI, target.iss, line1) });
+      const subject = satelliteSubject(target.page.title, target.record.satnum, target.record.inclo * 180 / Math.PI, target.iss, line1);
+      wanted.push({ parentId: target.page.id, subject });
+      if (target.elevation >= 10) {
+        // Satellite passes last minutes, so record every sighting rather than every five minutes.
+        seen.push({ kind: "satellite", elevation: target.elevation, subject: { key: `satellite#${target.record.satnum.trim()}`, label: target.page.title,
+          anchor: { ...subject.anchor, context: subject.key, iss: target.iss ? "yes" : "" } } });
+        fresh.add(`satellite#${target.record.satnum.trim()}`);
+      }
     }
   }
   const modes: Record<string, Page["mode"]> = { aircraft: "air", vessel: "marine", freight: "rail", satellite: "space" };
@@ -269,6 +285,11 @@ export async function handler() {
     return undefined;
   });
   board.awsCosts = awsCostsPage(aws, now);
+  board.overnight = await overnightScreens(now).catch((error: unknown) => {
+    console.warn("overnight: %s", error instanceof Error ? error.message : "read failed");
+    return undefined;
+  });
+  await recordSightings(seen, now.getTime(), (key) => !fresh.has(key));
   [board.costs, board.runningCosts] = await Promise.all([costsPage(now), runningCostsPage(now, aws)].map((page) => page.catch((error: unknown) => {
     console.warn("costs: %s", error instanceof Error ? error.message : "read failed");
     return undefined;

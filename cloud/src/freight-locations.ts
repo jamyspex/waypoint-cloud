@@ -1,6 +1,17 @@
 // STANOX codes for Inverness, the Far North line and the Kyle line, from Network Rail CORPUS
 // reference data (via the YA Tiploc List). TRUST reports STANOX as five digits with a leading zero.
 export type Line = "inverness" | "far-north" | "kyle" | "approach";
+
+// TRUST sector codes (toc_id) for freight and engineering operators, from the Open Rail Data wiki TOC Codes page.
+export const operators: Record<string, string> = {
+  "04": "DB CARGO", "05": "DB CARGO", "08": "DB CARGO", "54": "GB RAILFREIGHT", "66": "FREIGHTLINER", "11": "FREIGHTLINER",
+  "42": "COLAS RAIL", "97": "DIRECT RAIL SERVICES", "07": "RAIL OPERATIONS GROUP", "09": "HEAVY HAUL RAIL", "34": "DC RAIL",
+  "50": "WEST COAST RAILWAYS", "89": "LOCOMOTIVE SERVICES", "95": "VARAMIS RAIL", "15": "NETWORK RAIL", "31": "NETWORK RAIL",
+  "92": "NETWORK RAIL", "39": "HARSCO", "40": "BALFOUR BEATTY", "43": "AMEY", "46": "SB RAIL", "49": "VOLKERRAIL",
+  "72": "LEGGE", "17": "HANSON & HALL", "10": "SERCO", "16": "LORAM", "36": "VINTAGE TRAINS", "60": "SCOTRAIL",
+  "35": "CALEDONIAN SLEEPER", "71": "TRANSPORT FOR WALES",
+};
+
 export const freightLocations: Record<string, { name: string; line: Line }> = {
   "01001": { name: "THURSO", line: "far-north" },
   "01002": { name: "", line: "far-north" },

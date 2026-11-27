@@ -9,7 +9,7 @@ import { textWidth } from "./font.js";
 type Pose = "talk" | "point" | "think" | "wave";
 
 // 16 x 20 at scale 2. B body, R arm, H highlight, T antenna tip, A antenna, L legs, E eyes and mouth.
-const base = [
+export const blipArt = [
   ".......TT.......",
   ".......TT.......",
   "........A.......",
@@ -104,21 +104,21 @@ function movesFor(count: number, seed: number): Moves[] {
   return Array.from({ length: count }, (_, i) => i === 0 ? { enter } : i === count - 1 ? { leave } : { idle: idles[(i - 1) % 2] });
 }
 
-function rowsOf(points: [number, number][], from: number, to: number): number[] {
+export function rowsOf(points: [number, number][], from: number, to: number): number[] {
   const rows = Array.from({ length: to - from }, () => 0);
   for (const [y, x] of points) if (y >= from && y < to) rows[y - from] |= 1 << x;
   return rows;
 }
 
-const letters = (wanted: string) => base.flatMap((line, y) => [...line].flatMap((char, x): [number, number][] => wanted.includes(char) ? [[y, x]] : []));
+const letters = (wanted: string) => blipArt.flatMap((line, y) => [...line].flatMap((char, x): [number, number][] => wanted.includes(char) ? [[y, x]] : []));
 const waveHigh: [number, number][] = [[8, 13], [7, 14], [6, 14], [5, 15], [4, 15], [3, 15]];
 const waveLow: [number, number][] = [[8, 13], [8, 14], [7, 15], [6, 15], [5, 15]];
 const closedEyes: [number, number][] = [[9, 5], [9, 6], [9, 9], [9, 10]];
 const closedMouth: [number, number][] = [[12, 6], [12, 7], [12, 8], [12, 9]];
-const standing: [number, number][] = [[16, 5], [16, 6], [17, 5], [17, 6], [18, 5], [18, 6], [19, 4], [19, 5], [19, 6],
+export const standing: [number, number][] = [[16, 5], [16, 6], [17, 5], [17, 6], [18, 5], [18, 6], [19, 4], [19, 5], [19, 6],
   [16, 9], [16, 10], [17, 9], [17, 10], [18, 9], [18, 10], [19, 9], [19, 10], [19, 11]];
 // A stride: one leg forward, one back.
-const striding: [number, number][] = [[16, 5], [16, 6], [17, 4], [17, 5], [18, 3], [18, 4], [19, 2], [19, 3], [19, 4],
+export const striding: [number, number][] = [[16, 5], [16, 6], [17, 4], [17, 5], [18, 3], [18, 4], [19, 2], [19, 3], [19, 4],
   [16, 9], [16, 10], [17, 10], [17, 11], [18, 11], [18, 12], [19, 11], [19, 12], [19, 13]];
 // A parachute canopy with rigging lines, drawn above Blip's head.
 const canopy = [
@@ -166,14 +166,14 @@ function blip(pose: Pose, moves: Moves): Graphic[] {
   return graphics;
 }
 
-const tail = [0b100000, 0b110000, 0b111000, 0b111100, 0b111000, 0b110000, 0b100000].map((bits) => {
+export const bubbleTail = [0b100000, 0b110000, 0b111000, 0b111100, 0b111000, 0b110000, 0b100000].map((bits) => {
   // Mirror so the point faces left, towards Blip.
   let mirrored = 0;
   for (let x = 0; x < 6; x++) if (bits & (1 << x)) mirrored |= 1 << (5 - x);
   return mirrored;
 });
 
-function wrap(text: string, width: number, lines: number): string[] {
+export function wrap(text: string, width: number, lines: number): string[] {
   const out: string[] = [];
   let line = "";
   for (const word of text.split(/\s+/)) {
@@ -208,7 +208,7 @@ export function contextPage(parent: { id: string; mode: Page["mode"] }, subject:
   ].find((text) => textWidth(text) <= room) ?? fit(model || via, room);
   const graphics: Graphic[] = [
     [41, 0, 213, 1, 6], [41, 63, 213, 1, 6], [40, 1, 1, 62, 6], [254, 1, 1, 62, 6],
-    [34, 26, 1, 6, tail],
+    [34, 26, 1, 6, bubbleTail],
     [46, 3, 1, 13, "DID YOU KNOW?"], [251 - textWidth(label), 3, 1, 9, label],
     [44, 12, 208, 1, 3],
     [46, 55, 1, 5, source],

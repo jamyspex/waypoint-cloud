@@ -11,17 +11,18 @@ const displayUrl = new URL(path, `https://${host}`);
 const port = Number(process.env.WAYPOINT_PORT || 4280);
 const profile = process.env.AWS_PROFILE || "linespeed-root-admin";
 const exec = promisify(execFile);
-// Saved sample screens for cards that are rarely live. Each is served at /demo/<name>.
-const demos = new Map();
-for (const name of ["air", "aurora", "mix", "freight", "context"]) {
+// Saved sample screens for cards that are rarely live. Each is served at /demo/<name>, read from disk on
+// every request so a fresh `npm run overnight:replay` shows without restarting the server.
+const demoNames = ["air", "aurora", "mix", "freight", "context", "overnight"];
+async function loadDemo(name) {
+  if (!demoNames.includes(name)) return undefined;
   const board = JSON.parse(await readFile(new URL(`./${name}-demo.json`, import.meta.url), "utf8"));
-  const screens = board.pages.map(({ id, mode, title }) => ({ id, mode, title }));
-  demos.set(name, { board, index: { version: 3, screens } });
+  return { board, index: { version: 3, screens: board.pages.map(({ id, mode, title }) => ({ id, mode, title })) } };
 }
 
 const assets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
-  ...[...demos.keys()].map((name) => [`/demo/${name}`, ["index.html", "text/html; charset=utf-8"]]),
+  ...demoNames.map((name) => [`/demo/${name}`, ["index.html", "text/html; charset=utf-8"]]),
   ["/emulator.mjs", ["emulator.mjs", "text/javascript; charset=utf-8"]],
   ["/render.mjs", ["render.mjs", "text/javascript; charset=utf-8"]],
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
@@ -62,7 +63,7 @@ const server = createServer(async (request, response) => {
   try {
     const incoming = new URL(request.url, "http://localhost");
     const [, demoName, demoScreen] = incoming.pathname.match(/^\/demo\/([a-z]+)\/(?:index|screen\/([A-Za-z0-9-]{1,24}))$/) ?? [];
-    const sample = demos.get(demoName);
+    const sample = demoName ? await loadDemo(demoName) : undefined;
     const samplePage = demoScreen && sample?.board.pages.find(({ id }) => id === demoScreen);
     if (sample && (!demoScreen || samplePage)) {
       const value = samplePage ? { ...sample.board, pages: [samplePage] } : sample.index;

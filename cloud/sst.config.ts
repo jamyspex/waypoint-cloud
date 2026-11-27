@@ -84,6 +84,10 @@ export default $config({
       },
     });
 
+    // Home page and privacy policy required by the Google OAuth consent screen for production publishing.
+    const site = { handler: "src/site.handler", runtime: "nodejs22.x" as const, memory: "128 MB" as const };
+    api.route("GET /", site);
+    api.route("GET /privacy", site);
     api.route("GET /v1/devices/waypoint/display", {
       handler: "src/display.handler",
       runtime: "nodejs22.x",
@@ -110,6 +114,14 @@ export default $config({
       primaryIndex: { hashKey: "subject" },
       ttl: "expireAt",
     });
+    // What passed by, for the overnight highlights: aircraft, vessels, satellites and aurora alerts (one row each
+    // per London day) and every local freight train report. Kept for 180 days.
+    const sightings = new sst.aws.Dynamo("Sightings", {
+      fields: { day: "string", sk: "string", subject: "string" },
+      primaryIndex: { hashKey: "day", rangeKey: "sk" },
+      globalIndexes: { bySubject: { hashKey: "subject", rangeKey: "sk" } },
+      ttl: "expireAt",
+    });
     const geminiKey = `/waypoint-terminal/${$app.stage}/gemini-api-key`;
     const collector = new sst.aws.Function("CollectFeeds", {
       handler: "src/collect.handler",
@@ -124,6 +136,7 @@ export default $config({
         FR24_API_TOKEN: fr24Token,
         FR24_CACHE_TABLE: fr24Cache.name,
         CONTEXT_TABLE: contextTable.name,
+        SIGHTINGS_TABLE: sightings.name,
       },
       permissions: [
         { actions: ["s3:GetObject", "s3:PutObject"], resources: [
@@ -142,6 +155,7 @@ export default $config({
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${fr24Token}`,
         ] },
         { actions: ["dynamodb:BatchGetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [fr24Cache.arn, contextTable.arn] },
+        { actions: ["dynamodb:UpdateItem"], resources: [sightings.arn] },
         { actions: ["ce:GetCostAndUsage"], resources: ["*"] },
         { actions: ["ssm:GetParameter"], resources: [
           $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${calendarPrefix}/client`,
@@ -185,6 +199,27 @@ export default $config({
     });
     new sst.aws.CronV2("ContextResearchSchedule", { function: contextResearcher, schedule: "rate(2 minutes)" });
 
+    // Overnight highlights (21:00-07:00), built at 07:00 London time and shown from 08:00 to 12:00. The cron
+    // runs at 06:00 and 07:00 UTC so 07:00 London is covered in both GMT and BST; the Lambda checks the hour.
+    const overnightDigest = new sst.aws.Function("OvernightDigest", {
+      handler: "src/overnight.handler",
+      runtime: "nodejs22.x",
+      timeout: "90 seconds",
+      environment: {
+        SIGHTINGS_TABLE: sightings.name, CONTEXT_TABLE: contextTable.name, FEED_SETTINGS: feedSettings,
+        GEMINI_API_KEY: geminiKey, GEMINI_MODEL: "gemini-4-hydrogen",
+      },
+      permissions: [
+        { actions: ["dynamodb:Query"], resources: [sightings.arn] },
+        { actions: ["dynamodb:BatchGetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], resources: [contextTable.arn] },
+        { actions: ["ssm:GetParameter"], resources: [
+          $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${geminiKey}`,
+          $interpolate`arn:aws:ssm:eu-west-1:${accountId}:parameter${feedSettings}`,
+        ] },
+      ],
+    });
+    new sst.aws.CronV2("OvernightDigestSchedule", { function: overnightDigest, schedule: "cron(0 6,7 * * ? *)" });
+
     // Freight: AWS reads RDM's NWR Train Movements Kafka topic and hands batches to this Lambda,
     // which keeps the latest position of every freight train in feeds/freight-trains.json.
     const trainMovements = aws.secretsmanager.getSecretOutput({ name: `waypoint-terminal/${$app.stage}/rdm-train-movements` });
@@ -200,10 +235,11 @@ export default $config({
       timeout: "60 seconds",
       memory: "512 MB",
       concurrency: { reserved: 1 },
-      environment: { SCENES_BUCKET: scenes.name, ROUTES_TABLE: freightRoutes.name },
+      environment: { SCENES_BUCKET: scenes.name, ROUTES_TABLE: freightRoutes.name, SIGHTINGS_TABLE: sightings.name },
       permissions: [
         { actions: ["s3:GetObject", "s3:PutObject"], resources: [$interpolate`${scenes.arn}/feeds/freight-trains.json`] },
         { actions: ["dynamodb:Query", "dynamodb:UpdateItem"], resources: [freightRoutes.arn] },
+        { actions: ["dynamodb:BatchWriteItem"], resources: [sightings.arn] },
         { actions: ["secretsmanager:GetSecretValue"], resources: [trainMovements.arn] },
       ],
     });

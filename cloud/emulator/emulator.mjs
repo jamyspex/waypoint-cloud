@@ -13,6 +13,7 @@ const demos = {
   mix: "Demo North Scotland mix · sample generation",
   freight: "Demo Highland freight · sample movements",
   context: "Demo did-you-know screens · facts researched by Gemini",
+  overnight: "Demo overnight highlights · Blip's case file (npm run overnight:replay)",
 };
 const demo = demos[location.pathname.match(/^\/demo\/([a-z]+)$/)?.[1]];
 for (const link of document.querySelectorAll("nav a")) {

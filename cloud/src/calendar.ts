@@ -36,7 +36,11 @@ async function token(client: Client, id: string, refresh: string, deadline: Abor
     method: "POST", signal: deadline,
     body: new URLSearchParams({ ...client, refresh_token: refresh, grant_type: "refresh_token" }),
   });
-  if (!response.ok) throw new Error("Calendar authorisation unavailable");
+  if (!response.ok) {
+    // Google's error code (e.g. invalid_grant when a refresh token has expired or been revoked) carries no secrets.
+    const code = await response.json().then((body: { error?: unknown }) => typeof body.error === "string" ? body.error.slice(0, 40) : "").catch(() => "");
+    throw new Error(`Calendar authorisation unavailable (HTTP ${response.status}${code ? ` ${code}` : ""}); reconnect with npm run calendar:connect`);
+  }
   const data = await response.json() as { access_token?: string; expires_in?: number };
   if (!data.access_token) throw new Error("Calendar authorisation unavailable");
   access.set(id, { refresh, token: data.access_token, expires: Date.now() + (data.expires_in ?? 60) * 1000 - 30_000 });
@@ -186,6 +190,12 @@ export async function calendarPage(ssm: SSMClient, prefix: string, now: Date): P
   let failures = 0;
   let successes = 0;
   const merged = new Map<string, Meeting>();
+  const reason = (error: unknown) => error instanceof Error ? error.message : "failed";
+  results.forEach((account, i) => {
+    const name = [...accounts.values()][i]?.label ?? `account ${i + 1}`;
+    if (account.status === "rejected") console.warn("calendar: %s %s", name, reason(account.reason));
+    else for (const calendar of account.value) if (calendar.status === "rejected") console.warn("calendar: %s %s", name, reason(calendar.reason));
+  });
   for (const account of results) {
     if (account.status === "rejected") { failures++; continue; }
     for (const calendar of account.value) {
